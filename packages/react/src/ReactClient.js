@@ -64,6 +64,13 @@ import {addTransitionType} from './ReactTransitionType';
 import {act} from './ReactAct';
 import {captureOwnerStack} from './ReactOwnerStack';
 import * as ReactCompilerRuntime from './ReactCompilerRuntime';
+import {
+  subscribeToExternalRuntime,
+  getExternalRuntimeRenderContext,
+  getExternalRuntimeCurrentUpdateLane,
+  externalRuntimeIsTransitionLane,
+  externalRuntimeLanesInclude,
+} from './ReactExternalRuntime';
 
 const Children = {
   map,
@@ -119,6 +126,12 @@ export {
   getCacheForType as unstable_getCacheForType,
   useCacheRefresh as unstable_useCacheRefresh,
   use,
+  // External-runtime introspection for external state libraries
+  subscribeToExternalRuntime as unstable_subscribeToExternalRuntime,
+  getExternalRuntimeRenderContext as unstable_getRenderContext,
+  getExternalRuntimeCurrentUpdateLane as unstable_getCurrentUpdateLane,
+  externalRuntimeIsTransitionLane as unstable_isTransitionLane,
+  externalRuntimeLanesInclude as unstable_lanesInclude,
   // enableScopeAPI
   REACT_SCOPE_TYPE as unstable_Scope,
   // enableTransitionTracing

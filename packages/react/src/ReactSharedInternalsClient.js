@@ -27,6 +27,10 @@ export type SharedStateClient = {
   T: null | Transition, // ReactCurrentBatchConfig for Transitions
   S: null | onStartTransitionFinish,
   G: null | onStartGestureTransitionFinish,
+  // External-runtime introspection registry, created by ReactExternalRuntime.
+  // Renderers register providers and deliver render/commit lifecycle events
+  // through this object (same renderer↔isomorphic pattern as S above).
+  E: null | mixed,
 
   // DEV-only
 
@@ -62,6 +66,7 @@ const ReactSharedInternals: SharedStateClient = {
   A: null,
   T: null,
   S: null,
+  E: null,
 } as any;
 if (enableGestureTransition) {
   ReactSharedInternals.G = null;

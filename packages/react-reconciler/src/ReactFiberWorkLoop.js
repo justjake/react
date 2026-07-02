@@ -192,6 +192,7 @@ import {
   includesOnlyTransitions,
   includesBlockingLane,
   includesTransitionLane,
+  isTransitionLane as laneIsTransitionLane,
   includesRetryLane,
   includesIdleGroupLanes,
   includesExpiredLane,
@@ -228,6 +229,14 @@ import {
   eventPriorityToLane,
 } from './ReactEventPriorities';
 import {requestCurrentTransition} from './ReactFiberTransition';
+import {
+  registerExternalRuntimeProvider,
+  notifyRenderPassStart,
+  notifyRenderPassEnd,
+  notifyCommit,
+  notifyBeforeMutation,
+  notifyAfterMutation,
+} from './ReactFiberExternalRuntime';
 import {
   SelectiveHydrationException,
   beginWork,
@@ -852,6 +861,48 @@ export function requestUpdateLane(fiber: Fiber): Lane {
 
   return eventPriorityToLane(resolveUpdatePriority());
 }
+
+// External-runtime introspection provider (see ReactFiberExternalRuntime).
+// getCurrentUpdateLane mirrors requestUpdateLane above, minus the
+// fiber-specific legacy-mode case (external state has no fiber yet) and with
+// gesture transitions treated as plain event-priority updates rather than an
+// error — an external write during a gesture is not schedulable state.
+// requestTransitionLane is idempotent within one event, so querying the lane
+// here returns exactly the lane the caller's subsequent setState calls get.
+registerExternalRuntimeProvider({
+  getRenderContext(): null | {container: mixed, renderLanes: number} {
+    if (
+      (executionContext & RenderContext) !== NoContext &&
+      workInProgressRoot !== null &&
+      workInProgressRootRenderLanes !== NoLanes
+    ) {
+      return {
+        container: workInProgressRoot.containerInfo,
+        renderLanes: workInProgressRootRenderLanes,
+      };
+    }
+    return null;
+  },
+  getCurrentUpdateLane(): number {
+    if (
+      (executionContext & RenderContext) !== NoContext &&
+      workInProgressRootRenderLanes !== NoLanes
+    ) {
+      return pickArbitraryLane(workInProgressRootRenderLanes);
+    }
+    const transition = requestCurrentTransition();
+    if (transition !== null && !(transition as any).gesture) {
+      return requestTransitionLane(transition);
+    }
+    return eventPriorityToLane(resolveUpdatePriority());
+  },
+  isTransitionLane(lane: number): boolean {
+    return laneIsTransitionLane(lane as any);
+  },
+  lanesInclude(lanes: number, lane: number): boolean {
+    return (lanes & lane) !== 0;
+  },
+});
 
 function requestRetryLane(fiber: Fiber) {
   // This is a fork of `requestUpdateLane` designed specifically for Suspense
@@ -2269,6 +2320,11 @@ function prepareFreshStack(root: FiberRoot, lanes: Lanes): Fiber {
 
   finishQueueingConcurrentUpdates();
 
+  // External-runtime lifecycle: a fresh stack starts (or, for NoLanes,
+  // resets) the render pass on this root. Fires after the concurrent update
+  // queue drained so listeners observe a consistent world.
+  notifyRenderPassStart(root, lanes);
+
   if (__DEV__) {
     resetOwnerStackLimit();
 
@@ -2748,6 +2804,9 @@ function renderRootSync(
 
     // It's safe to process the queue now that the render phase is complete.
     finishQueueingConcurrentUpdates();
+
+    // External-runtime lifecycle: the render pass is over.
+    notifyRenderPassEnd(root);
   }
 
   return exitStatus;
@@ -3032,6 +3091,9 @@ function renderRootConcurrent(root: FiberRoot, lanes: Lanes): RootExitStatus {
 
     // It's safe to process the queue now that the render phase is complete.
     finishQueueingConcurrentUpdates();
+
+    // External-runtime lifecycle: the render pass is over.
+    notifyRenderPassEnd(root);
 
     // Return the final exit status.
     return workInProgressRootExitStatus;
@@ -4012,6 +4074,12 @@ function flushMutationEffects(): void {
     setCurrentUpdatePriority(DiscreteEventPriority);
     const prevExecutionContext = executionContext;
     executionContext |= CommitContext;
+    // External-runtime lifecycle: bracket exactly the window in which React
+    // mutates the host tree (e.g. so a MutationObserver can ignore React's
+    // own mutations). This must live here — not in commitRoot — because View
+    // Transition commits run this phase later, inside the browser's
+    // startViewTransition update callback.
+    notifyBeforeMutation(root);
     try {
       // The next phase is the mutation phase, where we mutate the host tree.
       commitMutationEffects(root, finishedWork, lanes);
@@ -4023,6 +4091,9 @@ function flushMutationEffects(): void {
       }
       resetAfterCommit(root.containerInfo);
     } finally {
+      // The bracket closes in a finally so an error during the mutation
+      // phase cannot leave listeners (observers) permanently paused.
+      notifyAfterMutation(root);
       // Reset the priority to the previous non-sync value.
       executionContext = prevExecutionContext;
       setCurrentUpdatePriority(previousPriority);
@@ -4036,6 +4107,11 @@ function flushMutationEffects(): void {
   // work is current during componentDidMount/Update.
   root.current = finishedWork;
   pendingEffectsStatus = PENDING_LAYOUT_PHASE;
+
+  // External-runtime lifecycle: the committed picture now includes this
+  // commit's lanes. root.pendingLanes was already updated by
+  // markRootFinished in commitRoot.
+  notifyCommit(root, lanes, root.pendingLanes);
 }
 
 function flushLayoutEffects(): void {
