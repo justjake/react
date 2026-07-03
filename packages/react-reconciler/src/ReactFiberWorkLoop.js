@@ -3846,7 +3846,7 @@ function commitRoot(
   // External-runtime batch registry (finish edge): lanes leaving
   // root.pendingLanes retire their batch tokens, exactly once, at the same
   // moment React's own books change.
-  batchRegistryOnRootFinished(root, root.pendingLanes);
+  batchRegistryOnRootFinished(root, lanes, root.pendingLanes);
 
   // Reset this before firing side effects so we can detect recursive updates.
   didIncludeCommitPhaseUpdate = false;

@@ -112,17 +112,18 @@ export function batchRegistryOnRootUpdated(root: FiberRoot, lane: Lane): void {
 }
 
 /**
- * Finish edge. Called after markRootFinished with the lanes still pending on
- * the root. A batch is done on a root when its lane is no longer pending
- * there — whether it committed normally or its updates died with deleted
- * fibers (React recomputes remaining lanes from the surviving tree, so
- * discarded work is *pruned*, never rendered). A token retires exactly once,
- * when its last pending root is done with it.
+ * Finish edge. Called after markRootFinished with both the lanes in this
+ * commit and the lanes still pending on the root. A batch is done on a root
+ * when its lane is no longer pending there. Its lane is in finishedLanes only
+ * when this commit rendered it; otherwise its updates died with deleted
+ * fibers and were pruned from the surviving tree. A token retires exactly
+ * once, when its last pending root is done with it.
  *
  * Cost: iterates only slots holding live tokens (typically 0–2).
  */
 export function batchRegistryOnRootFinished(
   root: FiberRoot,
+  finishedLanes: Lanes,
   remainingLanes: Lanes,
 ): void {
   for (let index = 0; index < slots.length; index++) {
@@ -138,10 +139,15 @@ export function batchRegistryOnRootFinished(
     if (roots === null || !roots.has(root)) {
       continue; // this batch never had work on this root
     }
+    const committed = (finishedLanes & lane) !== 0;
     roots.delete(root);
     if (roots.size === 0) {
-      retireSlot(slot, true);
-    } else {
+      retireSlot(
+        slot,
+        committed ||
+          (slot.committedRoots !== null && slot.committedRoots.size > 0),
+      );
+    } else if (committed) {
       // Committed here, still pending elsewhere: renders on this root must
       // keep including the batch until it fully retires (per-root lock-in).
       if (slot.committedRoots === null) {
