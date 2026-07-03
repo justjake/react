@@ -11,6 +11,7 @@ import type {FiberRoot} from './ReactInternalTypes';
 import type {Lanes} from './ReactFiberLane';
 
 import ReactSharedInternals from 'shared/ReactSharedInternals';
+import {batchTokensForLanes} from './ReactFiberBatchRegistry';
 
 /**
  * Reconciler side of the external-runtime introspection channel (see
@@ -26,7 +27,11 @@ import ReactSharedInternals from 'shared/ReactSharedInternals';
 type ExternalRuntimeLike = {
   providers: Array<mixed>,
   hasListeners: boolean,
-  emitRenderPassStart: (container: mixed, renderLanes: number) => void,
+  emitRenderPassStart: (
+    container: mixed,
+    includedBatches: $ReadOnlyArray<mixed>,
+    renderLanes: number,
+  ) => void,
   emitRenderPassEnd: (container: mixed) => void,
   emitCommit: (
     container: mixed,
@@ -75,7 +80,11 @@ export function notifyRenderPassStart(root: FiberRoot, lanes: Lanes): void {
   if (lanes !== 0) {
     rootsWithActivePass.add(root);
     if (runtime.hasListeners) {
-      runtime.emitRenderPassStart(root.containerInfo, lanes);
+      runtime.emitRenderPassStart(
+        root.containerInfo,
+        batchTokensForLanes(lanes),
+        lanes,
+      );
     }
   }
 }
