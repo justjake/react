@@ -52,7 +52,10 @@ import {
   performWorkOnRoot,
 } from './ReactFiberWorkLoop';
 import {LegacyRoot} from './ReactRootTags';
-import {batchRegistryOnEventClosed} from './ReactFiberBatchRegistry';
+import {
+  batchRegistryOnEventClosed,
+  batchRegistryBackfillRoot,
+} from './ReactFiberBatchRegistry';
 import {
   ImmediatePriority as ImmediateSchedulerPriority,
   UserBlockingPriority as UserBlockingSchedulerPriority,
@@ -313,6 +316,11 @@ function processRootScheduleInMicrotask() {
     } else {
       // This root still has work. Keep it in the list.
       prev = root;
+
+      // External-runtime batch registry: repair pending edges missed because
+      // an update was scheduled before its batch's token was minted (see
+      // batchRegistryBackfillRoot). Must run before the close edge below.
+      batchRegistryBackfillRoot(root);
 
       // This is a fast-path optimization to early exit from
       // flushSyncWorkOnAllRoots if we can be certain that there is no remaining

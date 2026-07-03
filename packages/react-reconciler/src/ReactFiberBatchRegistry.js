@@ -112,6 +112,34 @@ export function batchRegistryOnRootUpdated(root: FiberRoot, lane: Lane): void {
 }
 
 /**
+ * Pending-edge repair. The pending edge only records a root when the token
+ * already exists, so an update scheduled BEFORE its batch's first store write
+ * (`startTransition(() => { setState(x); store.write(y); })` — ordinary line
+ * order) is invisible to the registry. Called from the root scheduler's
+ * microtask for every root still holding work, before the close edge decides
+ * a batch is store-only: any live token whose lane is pending on the root
+ * records it, so the finish edge retires the batch at its real commit
+ * instead of the close edge retiring it early.
+ *
+ * Cost per scheduled root: iterates only slots holding live tokens
+ * (typically 0–2); Set.add is idempotent for roots already recorded.
+ */
+export function batchRegistryBackfillRoot(root: FiberRoot): void {
+  for (let index = 0; index < slots.length; index++) {
+    const slot = slots[index];
+    if (slot === null || slot.token === null) {
+      continue;
+    }
+    if ((root.pendingLanes & (1 << index)) !== 0) {
+      if (slot.roots === null) {
+        slot.roots = new Set();
+      }
+      slot.roots.add(root);
+    }
+  }
+}
+
+/**
  * Finish edge. Called after markRootFinished with both the lanes in this
  * commit and the lanes still pending on the root. A batch is done on a root
  * when its lane is no longer pending there. Its lane is in finishedLanes only

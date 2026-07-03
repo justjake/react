@@ -126,6 +126,39 @@ describe('ReactFiberBatchRegistry', () => {
     unsubscribe();
   });
 
+  it('retires at commit when React work was scheduled before the token was minted', async () => {
+    // Ordinary line order inside one transition: setState first, store write
+    // second. The pending edge misses the setState (no token existed yet);
+    // the root scheduler's back-fill repairs it before the close edge, so
+    // the batch retires committed at its real commit, not early at event
+    // close as "store-only".
+    const {events, unsubscribe} = subscribe();
+    let setValue;
+    function App() {
+      const [value, _setValue] = useState(0);
+      setValue = _setValue;
+      return <Text text={`v=${value}`} />;
+    }
+    const root = ReactNoop.createRoot();
+    await act(() => {
+      root.render(<App />);
+    });
+    assertLog(['v=0']);
+
+    let token = null;
+    await act(() => {
+      startTransition(() => {
+        setValue(1); // React work FIRST
+        token = React.unstable_getCurrentWriteBatch(); // minted after
+      });
+    });
+    assertLog(['v=1']);
+    expect(events.retired.filter(r => r.token === token)).toEqual([
+      {token, committed: true},
+    ]);
+    unsubscribe();
+  });
+
   it('render passes report included batches; interrupting urgent renders exclude pending transitions', async () => {
     const {events, unsubscribe} = subscribe();
     let setUrgent;
