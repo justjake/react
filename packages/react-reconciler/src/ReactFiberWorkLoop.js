@@ -233,7 +233,6 @@ import {
   getOrMintBatchToken,
   batchRegistryOnRootUpdated,
   batchRegistryOnRootFinished,
-  batchTokensForLanes,
 } from './ReactFiberBatchRegistry';
 import {
   registerExternalRuntimeProvider,
@@ -870,12 +869,13 @@ export function requestUpdateLane(fiber: Fiber): Lane {
 }
 
 // External-runtime introspection provider (see ReactFiberExternalRuntime).
-// getCurrentUpdateLane mirrors requestUpdateLane above, minus the
+// The write-classification cascade mirrors requestUpdateLane above, minus the
 // fiber-specific legacy-mode case (external state has no fiber yet) and with
 // gesture transitions treated as plain event-priority updates rather than an
 // error — an external write during a gesture is not schedulable state.
-// requestTransitionLane is idempotent within one event, so querying the lane
-// here returns exactly the lane the caller's subsequent setState calls get.
+// requestTransitionLane is idempotent within one event, so claiming the lane
+// here attributes the write to exactly the batch the caller's subsequent
+// setState calls join.
 registerExternalRuntimeProvider({
   getRenderContext(): null | {container: mixed, renderLanes: number} {
     if (
@@ -889,19 +889,6 @@ registerExternalRuntimeProvider({
       };
     }
     return null;
-  },
-  getCurrentUpdateLane(): number {
-    if (
-      (executionContext & RenderContext) !== NoContext &&
-      workInProgressRootRenderLanes !== NoLanes
-    ) {
-      return pickArbitraryLane(workInProgressRootRenderLanes);
-    }
-    const transition = requestCurrentTransition();
-    if (transition !== null && !(transition as any).gesture) {
-      return requestTransitionLane(transition);
-    }
-    return eventPriorityToLane(resolveUpdatePriority());
   },
   // Classification only — no token minting, no side effects. Lets external
   // stores apply their observability gate BEFORE asking for a token, so a
@@ -944,15 +931,6 @@ registerExternalRuntimeProvider({
     // schedules React work: make sure the scheduling microtask runs.
     ensureScheduleIsScheduled();
     return token;
-  },
-  batchesForLanes(lanes: number): mixed {
-    return batchTokensForLanes(lanes as any);
-  },
-  isTransitionLane(lane: number): boolean {
-    return laneIsTransitionLane(lane as any);
-  },
-  lanesInclude(lanes: number, lane: number): boolean {
-    return (lanes & lane) !== 0;
   },
 });
 
