@@ -83,6 +83,9 @@ export type ExternalRuntimeProvider = {
   getRenderContext: () => null | {container: mixed, renderLanes: number},
   /** The lane an update scheduled right now would get. */
   getCurrentUpdateLane: () => number,
+  /** Would a write issued right now belong to a deferred (transition-like)
+   * batch? Pure classification: no token minting, no side effects. */
+  isCurrentWriteDeferred: () => boolean,
   /** Identity of the batch an external write issued right now belongs to.
    * The returned token is stable for the batch's life and carries a
    * `deferred` flag; the call allocates only on the batch's first use. */
@@ -185,6 +188,11 @@ export function getExternalRuntimeCurrentUpdateLane(): number {
   // thread; the first registered provider answers. With multiple renderers
   // loaded, lane attribution is best-effort (documented limitation).
   return providers.length > 0 ? providers[0].getCurrentUpdateLane() : 0;
+}
+
+export function externalRuntimeIsCurrentWriteDeferred(): boolean {
+  const providers = runtime.providers;
+  return providers.length > 0 ? providers[0].isCurrentWriteDeferred() : false;
 }
 
 export function getExternalRuntimeCurrentWriteBatch(): mixed {
