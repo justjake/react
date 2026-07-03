@@ -10,20 +10,22 @@
 /**
  * Experimental introspection channel for external state libraries.
  *
- * Concurrent React renders the same app state at different priorities
- * ("lanes"): a transition render and an urgent render may be in flight around
- * one another, and a render pass may be discarded and restarted. State that
- * lives outside React cannot participate correctly without knowing three
- * things userspace cannot otherwise observe:
+ * Concurrent React renders the same app state as different update batches: a
+ * transition render and an urgent render may be in flight around one another,
+ * and a render pass may be discarded and restarted. State that lives outside
+ * React cannot participate correctly without knowing three things userspace
+ * cannot otherwise observe:
  *
- *   1. the lane an update scheduled *right now* would be assigned
- *      (getCurrentUpdateLane), so an external write can be attributed to the
- *      same "version of the world" as the setState calls it batches with;
- *   2. which root/lanes are currently rendering (getRenderContext and the
- *      render-pass listener events), so reads during render can resolve
- *      against the matching version;
- *   3. when a commit lands and with which lanes (onCommit), so pending
- *      versions can be promoted to committed state.
+ *   1. the identity of the batch a write issued *right now* belongs to
+ *      (getCurrentWriteBatch, with isCurrentWriteDeferred as its
+ *      allocation-free classification), so an external write can be
+ *      attributed to the same "version of the world" as the setState calls
+ *      it batches with;
+ *   2. which root is currently rendering and which batches that pass
+ *      includes (getRenderContext and the render-pass listener events), so
+ *      reads during render can resolve against the matching version;
+ *   3. when each batch retires (onBatchRetired, exactly once per token), so
+ *      pending versions can be promoted to committed state.
  *
  * Separately, onBeforeMutation/onAfterMutation bracket exactly the window in
  * which React mutates the DOM during a commit, so a MutationObserver can
@@ -36,10 +38,11 @@
  * - This module is isomorphic; renderers register a provider (and call the
  *   emit* methods) through ReactSharedInternals.E, following the same pattern
  *   as ReactSharedInternals.S (onStartTransitionFinish).
- * - Lane values cross this boundary as opaque numbers: stable to compare with
- *   the helpers here, meaningless to inspect. Roots are identified by their
- *   container (for react-dom, the DOM container element) — an identity token
- *   that is also what a MutationObserver caller needs.
+ * - Batches cross this boundary as opaque tokens (see
+ *   ReactFiberBatchRegistry): stable identities to compare, meaningless to
+ *   inspect. Roots are identified by their container (for react-dom, the DOM
+ *   container element) — an identity token that is also what a
+ *   MutationObserver caller needs.
  * - Everything here is inert until the first listener subscribes; the
  *   per-commit cost with no listeners is one property read and branch.
  */
@@ -81,8 +84,6 @@ export type ExternalRuntimeListener = {
 export type ExternalRuntimeProvider = {
   /** Non-null while a render pass is executing on the current thread. */
   getRenderContext: () => null | {container: mixed, renderLanes: number},
-  /** The lane an update scheduled right now would get. */
-  getCurrentUpdateLane: () => number,
   /** Would a write issued right now belong to a deferred (transition-like)
    * batch? Pure classification: no token minting, no side effects. */
   isCurrentWriteDeferred: () => boolean,
@@ -90,10 +91,6 @@ export type ExternalRuntimeProvider = {
    * The returned token is stable for the batch's life and carries a
    * `deferred` flag; the call allocates only on the batch's first use. */
   getCurrentWriteBatch: () => mixed,
-  /** Live batch tokens for a lane word (used for render included-sets). */
-  batchesForLanes: (lanes: number) => mixed,
-  isTransitionLane: (lane: number) => boolean,
-  lanesInclude: (lanes: number, lane: number) => boolean,
 };
 
 const listeners: Set<ExternalRuntimeListener> = new Set();
@@ -182,13 +179,9 @@ export function getExternalRuntimeRenderContext(): null | {
   return null;
 }
 
-export function getExternalRuntimeCurrentUpdateLane(): number {
-  const providers = runtime.providers;
-  // Only one renderer can be processing an event / rendering at a time on a
-  // thread; the first registered provider answers. With multiple renderers
-  // loaded, lane attribution is best-effort (documented limitation).
-  return providers.length > 0 ? providers[0].getCurrentUpdateLane() : 0;
-}
+// Only one renderer can be processing an event / rendering at a time on a
+// thread; the first registered provider answers. With multiple renderers
+// loaded, batch attribution is best-effort (documented limitation).
 
 export function externalRuntimeIsCurrentWriteDeferred(): boolean {
   const providers = runtime.providers;
@@ -198,17 +191,4 @@ export function externalRuntimeIsCurrentWriteDeferred(): boolean {
 export function getExternalRuntimeCurrentWriteBatch(): mixed {
   const providers = runtime.providers;
   return providers.length > 0 ? providers[0].getCurrentWriteBatch() : null;
-}
-
-export function externalRuntimeIsTransitionLane(lane: number): boolean {
-  const providers = runtime.providers;
-  return providers.length > 0 ? providers[0].isTransitionLane(lane) : false;
-}
-
-export function externalRuntimeLanesInclude(
-  lanes: number,
-  lane: number,
-): boolean {
-  const providers = runtime.providers;
-  return providers.length > 0 ? providers[0].lanesInclude(lanes, lane) : false;
 }

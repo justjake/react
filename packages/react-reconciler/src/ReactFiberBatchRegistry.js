@@ -10,7 +10,7 @@
 import type {FiberRoot} from './ReactInternalTypes';
 import type {Lane, Lanes} from './ReactFiberLane';
 
-import ReactSharedInternals from 'shared/ReactSharedInternals';
+import {getExternalRuntime} from './ReactFiberExternalRuntime';
 
 /**
  * Batch tokens: stable identities for "a batch of updates React renders and
@@ -69,15 +69,6 @@ function slotFor(lane: Lane): Slot {
     slots[index] = slot;
   }
   return slot;
-}
-
-function runtime(): any {
-  return (ReactSharedInternals as any).E || null;
-}
-
-function hasListeners(): boolean {
-  const e = runtime();
-  return e !== null && e.hasListeners;
 }
 
 /**
@@ -164,8 +155,11 @@ function retireSlot(slot: Slot, committed: boolean): void {
   const token = slot.token;
   slot.token = null;
   slot.roots = null;
-  if (token !== null && hasListeners()) {
-    runtime().emitBatchRetired(token, committed);
+  if (token !== null) {
+    const runtime = getExternalRuntime();
+    if (runtime !== null && runtime.hasListeners) {
+      runtime.emitBatchRetired(token, committed);
+    }
   }
 }
 

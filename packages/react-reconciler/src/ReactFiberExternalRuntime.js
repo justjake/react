@@ -9,6 +9,10 @@
 
 import type {FiberRoot} from './ReactInternalTypes';
 import type {Lanes} from './ReactFiberLane';
+import type {
+  ExternalRuntime,
+  ExternalRuntimeProvider,
+} from 'react/src/ReactExternalRuntime';
 
 import ReactSharedInternals from 'shared/ReactSharedInternals';
 import {batchTokensForLanes} from './ReactFiberBatchRegistry';
@@ -24,33 +28,17 @@ import {batchTokensForLanes} from './ReactFiberBatchRegistry';
  * No Fiber or FiberRoot shapes cross this boundary.
  */
 
-type ExternalRuntimeLike = {
-  providers: Array<mixed>,
-  hasListeners: boolean,
-  emitRenderPassStart: (
-    container: mixed,
-    includedBatches: $ReadOnlyArray<mixed>,
-    renderLanes: number,
-  ) => void,
-  emitRenderPassEnd: (container: mixed) => void,
-  emitCommit: (
-    container: mixed,
-    committedLanes: number,
-    remainingLanes: number,
-  ) => void,
-  emitBeforeMutation: (container: mixed) => void,
-  emitAfterMutation: (container: mixed) => void,
-};
-
-function getRuntime(): ExternalRuntimeLike | null {
-  // The registry exists once the isomorphic `react` module has evaluated.
+export function getExternalRuntime(): ExternalRuntime | null {
+  // The runtime exists once the isomorphic `react` module has evaluated.
   // It is null with mismatched react/renderer versions; every entry point
-  // below tolerates that by doing nothing.
+  // here tolerates that by doing nothing.
   return (ReactSharedInternals as any).E || null;
 }
 
-export function registerExternalRuntimeProvider(provider: mixed): void {
-  const runtime = getRuntime();
+export function registerExternalRuntimeProvider(
+  provider: ExternalRuntimeProvider,
+): void {
+  const runtime = getExternalRuntime();
   if (runtime !== null) {
     runtime.providers.push(provider);
   }
@@ -67,7 +55,7 @@ const rootsWithActivePass: WeakSet<FiberRoot> = new WeakSet();
  * reset without starting new work (e.g. interrupting a suspended render).
  */
 export function notifyRenderPassStart(root: FiberRoot, lanes: Lanes): void {
-  const runtime = getRuntime();
+  const runtime = getExternalRuntime();
   if (runtime === null) {
     return;
   }
@@ -95,7 +83,7 @@ export function notifyRenderPassStart(root: FiberRoot, lanes: Lanes): void {
  * end exactly once.
  */
 export function notifyRenderPassEnd(root: FiberRoot): void {
-  const runtime = getRuntime();
+  const runtime = getExternalRuntime();
   if (runtime === null) {
     return;
   }
@@ -117,7 +105,7 @@ export function notifyCommit(
   committedLanes: Lanes,
   remainingLanes: Lanes,
 ): void {
-  const runtime = getRuntime();
+  const runtime = getExternalRuntime();
   if (runtime !== null && runtime.hasListeners) {
     runtime.emitCommit(root.containerInfo, committedLanes, remainingLanes);
   }
@@ -131,14 +119,14 @@ export function notifyCommit(
  * callback — are bracketed correctly too.
  */
 export function notifyBeforeMutation(root: FiberRoot): void {
-  const runtime = getRuntime();
+  const runtime = getExternalRuntime();
   if (runtime !== null && runtime.hasListeners) {
     runtime.emitBeforeMutation(root.containerInfo);
   }
 }
 
 export function notifyAfterMutation(root: FiberRoot): void {
-  const runtime = getRuntime();
+  const runtime = getExternalRuntime();
   if (runtime !== null && runtime.hasListeners) {
     runtime.emitAfterMutation(root.containerInfo);
   }
