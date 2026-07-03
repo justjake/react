@@ -71,7 +71,6 @@ export function notifyRenderPassStart(root: FiberRoot, lanes: Lanes): void {
       runtime.emitRenderPassStart(
         root.containerInfo,
         batchTokensForLanes(lanes),
-        lanes,
       );
     }
   }
@@ -92,22 +91,6 @@ export function notifyRenderPassEnd(root: FiberRoot): void {
     if (runtime.hasListeners) {
       runtime.emitRenderPassEnd(root.containerInfo);
     }
-  }
-}
-
-/**
- * Called from flushMutationEffects after the tree swap (root.current points
- * at the finished work): the commit's host mutations are done and the
- * committed picture includes `committedLanes`.
- */
-export function notifyCommit(
-  root: FiberRoot,
-  committedLanes: Lanes,
-  remainingLanes: Lanes,
-): void {
-  const runtime = getExternalRuntime();
-  if (runtime !== null && runtime.hasListeners) {
-    runtime.emitCommit(root.containerInfo, committedLanes, remainingLanes);
   }
 }
 

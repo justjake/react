@@ -238,7 +238,6 @@ import {
   registerExternalRuntimeProvider,
   notifyRenderPassStart,
   notifyRenderPassEnd,
-  notifyCommit,
   notifyBeforeMutation,
   notifyAfterMutation,
 } from './ReactFiberExternalRuntime';
@@ -877,16 +876,13 @@ export function requestUpdateLane(fiber: Fiber): Lane {
 // here attributes the write to exactly the batch the caller's subsequent
 // setState calls join.
 registerExternalRuntimeProvider({
-  getRenderContext(): null | {container: mixed, renderLanes: number} {
+  getRenderContext(): null | {container: mixed} {
     if (
       (executionContext & RenderContext) !== NoContext &&
       workInProgressRoot !== null &&
       workInProgressRootRenderLanes !== NoLanes
     ) {
-      return {
-        container: workInProgressRoot.containerInfo,
-        renderLanes: workInProgressRootRenderLanes,
-      };
+      return {container: workInProgressRoot.containerInfo};
     }
     return null;
   },
@@ -4146,11 +4142,6 @@ function flushMutationEffects(): void {
   // work is current during componentDidMount/Update.
   root.current = finishedWork;
   pendingEffectsStatus = PENDING_LAYOUT_PHASE;
-
-  // External-runtime lifecycle: the committed picture now includes this
-  // commit's lanes. root.pendingLanes was already updated by
-  // markRootFinished in commitRoot.
-  notifyCommit(root, lanes, root.pendingLanes);
 }
 
 function flushLayoutEffects(): void {
