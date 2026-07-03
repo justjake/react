@@ -54,21 +54,13 @@ export type ExternalRuntimeListener = {
   /** A render pass began on `container`. `includedBatches` are the tokens of
    * every live batch this pass renders (see getCurrentWriteBatch). Passes can
    * yield to the browser and resume; a pass ends by completing or
-   * restarting. `renderLanes` is the raw lane word, for diagnostics only. */
+   * restarting. */
   onRenderPassStart?: (
     container: mixed,
     includedBatches: $ReadOnlyArray<mixed>,
-    renderLanes: number,
   ) => void,
   /** The render pass on `container` completed or was discarded. */
   onRenderPassEnd?: (container: mixed) => void,
-  /** A commit's host-tree mutations finished; the committed tree is current.
-   * `committedLanes` were rendered; `remainingLanes` are still pending. */
-  onCommit?: (
-    container: mixed,
-    committedLanes: number,
-    remainingLanes: number,
-  ) => void,
   /** React is about to mutate the host tree under `container`. Fires only
    * when there are mutations to apply. */
   onBeforeMutation?: (container: mixed) => void,
@@ -83,7 +75,7 @@ export type ExternalRuntimeListener = {
 
 export type ExternalRuntimeProvider = {
   /** Non-null while a render pass is executing on the current thread. */
-  getRenderContext: () => null | {container: mixed, renderLanes: number},
+  getRenderContext: () => null | {container: mixed},
   /** Would a write issued right now belong to a deferred (transition-like)
    * batch? Pure classification: no token minting, no side effects. */
   isCurrentWriteDeferred: () => boolean,
@@ -95,14 +87,14 @@ export type ExternalRuntimeProvider = {
 
 const listeners: Set<ExternalRuntimeListener> = new Set();
 
-function emit(event: string, a: mixed, b?: mixed, c?: mixed): void {
+function emit(event: string, a: mixed, b?: mixed): void {
   // Deliver to every listener even if one throws; a listener error must not
   // corrupt React's commit, so it is reported like an uncaught error.
   for (const listener of listeners) {
     const handler = (listener as any)[event];
     if (handler != null) {
       try {
-        handler(a, b, c);
+        handler(a, b);
       } catch (error) {
         reportGlobalError(error);
       }
@@ -116,14 +108,8 @@ export type ExternalRuntime = {
   emitRenderPassStart: (
     container: mixed,
     includedBatches: $ReadOnlyArray<mixed>,
-    renderLanes: number,
   ) => void,
   emitRenderPassEnd: (container: mixed) => void,
-  emitCommit: (
-    container: mixed,
-    committedLanes: number,
-    remainingLanes: number,
-  ) => void,
   emitBeforeMutation: (container: mixed) => void,
   emitAfterMutation: (container: mixed) => void,
   emitBatchRetired: (token: mixed, committed: boolean) => void,
@@ -132,14 +118,11 @@ export type ExternalRuntime = {
 const runtime: ExternalRuntime = {
   providers: [],
   hasListeners: false,
-  emitRenderPassStart(container, includedBatches, renderLanes) {
-    emit('onRenderPassStart', container, includedBatches, renderLanes);
+  emitRenderPassStart(container, includedBatches) {
+    emit('onRenderPassStart', container, includedBatches);
   },
   emitRenderPassEnd(container) {
     emit('onRenderPassEnd', container);
-  },
-  emitCommit(container, committedLanes, remainingLanes) {
-    emit('onCommit', container, committedLanes, remainingLanes);
   },
   emitBeforeMutation(container) {
     emit('onBeforeMutation', container);
@@ -165,10 +148,7 @@ export function subscribeToExternalRuntime(
   };
 }
 
-export function getExternalRuntimeRenderContext(): null | {
-  container: mixed,
-  renderLanes: number,
-} {
+export function getExternalRuntimeRenderContext(): null | {container: mixed} {
   const providers = runtime.providers;
   for (let i = 0; i < providers.length; i++) {
     const context = providers[i].getRenderContext();
