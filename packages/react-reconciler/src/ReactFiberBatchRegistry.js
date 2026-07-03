@@ -9,8 +9,13 @@
 
 import type {FiberRoot} from './ReactInternalTypes';
 import type {Lane, Lanes} from './ReactFiberLane';
+import type {Thenable} from 'shared/ReactTypes';
 
 import {getExternalRuntime} from './ReactFiberExternalRuntime';
+import {
+  peekEntangledActionLane,
+  peekEntangledActionThenable,
+} from './ReactFiberAsyncAction';
 
 /**
  * Batch tokens: stable identities for "a batch of updates React renders and
@@ -55,6 +60,13 @@ type Slot = {
   token: BatchToken | null,
   /** Roots this batch has scheduled work on and not yet finished. */
   roots: Set<FiberRoot> | null,
+  /** Roots that already committed this batch while it stays pending on
+   * others: renders on these roots must keep including the batch (their
+   * committed tree already shows it) even though the token has not retired. */
+  committedRoots: Set<FiberRoot> | null,
+  /** Open async-action thenable this store-only batch is parked on: the
+   * close edge must not retire it until the action settles. */
+  parked: Thenable<void> | null,
 };
 
 // One slot per lane index (31 lanes).
@@ -65,7 +77,7 @@ function slotFor(lane: Lane): Slot {
   const index = 31 - Math.clz32(lane);
   let slot = slots[index];
   if (slot === null) {
-    slot = {token: null, roots: null};
+    slot = {token: null, roots: null, committedRoots: null, parked: null};
     slots[index] = slot;
   }
   return slot;
@@ -129,6 +141,13 @@ export function batchRegistryOnRootFinished(
     roots.delete(root);
     if (roots.size === 0) {
       retireSlot(slot, true);
+    } else {
+      // Committed here, still pending elsewhere: renders on this root must
+      // keep including the batch until it fully retires (per-root lock-in).
+      if (slot.committedRoots === null) {
+        slot.committedRoots = new Set();
+      }
+      slot.committedRoots.add(root);
     }
   }
 }
@@ -137,24 +156,64 @@ export function batchRegistryOnRootFinished(
  * Close edge: the scheduling microtask for the current event is done
  * (currentEventTransitionLane resets). A token whose batch never scheduled
  * React work on any root will never see a finish edge — retire it now.
+ *
+ * Exception: a store-only batch whose transition turned out to be an async
+ * action (the scope returned a promise) must stay pending for the action's
+ * whole life — the action's post-await updates commit later, and retiring at
+ * event close would leak the batch's store writes into committed state
+ * mid-action. Entanglement is only knowable after the scope returns, which
+ * is before this microtask runs, so the check belongs exactly here: park the
+ * slot on the action thenable and re-run the close decision when it settles.
  */
 export function batchRegistryOnEventClosed(): void {
+  const actionLane = peekEntangledActionLane();
   for (let i = 0; i < slots.length; i++) {
     const slot = slots[i];
     if (
-      slot !== null &&
-      slot.token !== null &&
-      (slot.roots === null || slot.roots.size === 0)
+      slot === null ||
+      slot.token === null ||
+      slot.parked !== null ||
+      (slot.roots !== null && slot.roots.size > 0)
     ) {
+      continue;
+    }
+    if (slot.token.deferred && (1 << i) === actionLane) {
+      const actionThenable = peekEntangledActionThenable();
+      if (actionThenable !== null) {
+        parkUntilActionSettles(slot, actionThenable);
+        continue;
+      }
+    }
+    retireSlot(slot, false);
+  }
+}
+
+function parkUntilActionSettles(
+  slot: Slot,
+  actionThenable: Thenable<void>,
+): void {
+  slot.parked = actionThenable;
+  const onSettle = () => {
+    if (slot.parked !== actionThenable) {
+      return;
+    }
+    slot.parked = null;
+    // The action settled. If its updates scheduled React work under this
+    // batch the finish edge owns retirement; a still store-only batch
+    // retires now, converging with the action's outcome.
+    if (slot.token !== null && (slot.roots === null || slot.roots.size === 0)) {
       retireSlot(slot, false);
     }
-  }
+  };
+  actionThenable.then(onSettle, onSettle);
 }
 
 function retireSlot(slot: Slot, committed: boolean): void {
   const token = slot.token;
   slot.token = null;
   slot.roots = null;
+  slot.committedRoots = null;
+  slot.parked = null;
   if (token !== null) {
     const runtime = getExternalRuntime();
     if (runtime !== null && runtime.hasListeners) {
@@ -163,8 +222,17 @@ function retireSlot(slot: Slot, committed: boolean): void {
   }
 }
 
-/** The live tokens for a render's lanes (identity of every included batch). */
-export function batchTokensForLanes(lanes: Lanes): Array<BatchToken> {
+/**
+ * The batches a render pass on `root` includes: the live tokens for its
+ * render lanes, plus every still-pending batch this root has ALREADY
+ * committed — the root's committed tree shows those writes, so hiding them
+ * from its later renders (urgent ones especially) would tear against its own
+ * DOM while other roots finish the batch.
+ */
+export function batchTokensForRender(
+  root: FiberRoot,
+  lanes: Lanes,
+): Array<BatchToken> {
   const tokens: Array<BatchToken> = [];
   let remaining = lanes;
   while (remaining !== 0) {
@@ -173,6 +241,21 @@ export function batchTokensForLanes(lanes: Lanes): Array<BatchToken> {
     const slot = slots[index];
     if (slot !== null && slot.token !== null) {
       tokens.push(slot.token);
+    }
+  }
+  for (let i = 0; i < slots.length; i++) {
+    const slot = slots[i];
+    if (slot === null) {
+      continue;
+    }
+    const token = slot.token;
+    if (
+      token !== null &&
+      slot.committedRoots !== null &&
+      slot.committedRoots.has(root) &&
+      ((lanes >> i) & 1) === 0 // not already collected via render lanes
+    ) {
+      tokens.push(token);
     }
   }
   return tokens;
