@@ -56,6 +56,7 @@ export {
   unstable_getCacheForType,
   unstable_useCacheRefresh,
   unstable_subscribeToExternalRuntime,
+  unstable_getCurrentWriteBatch,
   unstable_getRenderContext,
   unstable_getCurrentUpdateLane,
   unstable_isTransitionLane,

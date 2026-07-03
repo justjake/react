@@ -52,6 +52,7 @@ import {
   performWorkOnRoot,
 } from './ReactFiberWorkLoop';
 import {LegacyRoot} from './ReactRootTags';
+import {batchRegistryOnEventClosed} from './ReactFiberBatchRegistry';
 import {
   ImmediatePriority as ImmediateSchedulerPriority,
   UserBlockingPriority as UserBlockingSchedulerPriority,
@@ -345,6 +346,9 @@ function processRootScheduleInMicrotask() {
     currentEventTransitionLane = NoLane;
     startDefaultTransitionIndicatorIfNeeded();
   }
+  // External-runtime batch registry: the event's scheduling is settled;
+  // batches that never produced React work retire now (close edge).
+  batchRegistryOnEventClosed();
 }
 
 function startDefaultTransitionIndicatorIfNeeded() {

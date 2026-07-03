@@ -230,6 +230,12 @@ import {
 } from './ReactEventPriorities';
 import {requestCurrentTransition} from './ReactFiberTransition';
 import {
+  getOrMintBatchToken,
+  batchRegistryOnRootUpdated,
+  batchRegistryOnRootFinished,
+  batchTokensForLanes,
+} from './ReactFiberBatchRegistry';
+import {
   registerExternalRuntimeProvider,
   notifyRenderPassStart,
   notifyRenderPassEnd,
@@ -413,6 +419,7 @@ import {
   flushSyncWorkOnAllRoots,
   flushSyncWorkOnLegacyRootsOnly,
   requestTransitionLane,
+  ensureScheduleIsScheduled,
 } from './ReactFiberRootScheduler';
 import {getMaskedContext, getUnmaskedContext} from './ReactFiberLegacyContext';
 import {logUncaughtError} from './ReactFiberErrorLogger';
@@ -895,6 +902,36 @@ registerExternalRuntimeProvider({
       return requestTransitionLane(transition);
     }
     return eventPriorityToLane(resolveUpdatePriority());
+  },
+  // Batch identity for an external write happening right now. Mints the
+  // token lazily (per batch, never per write); returns the token itself so
+  // this call never allocates after the batch's first write.
+  getCurrentWriteBatch(): mixed {
+    let lane;
+    let deferred = false;
+    if (
+      (executionContext & RenderContext) !== NoContext &&
+      workInProgressRootRenderLanes !== NoLanes
+    ) {
+      lane = pickArbitraryLane(workInProgressRootRenderLanes);
+      deferred = laneIsTransitionLane(lane as any);
+    } else {
+      const transition = requestCurrentTransition();
+      if (transition !== null && !(transition as any).gesture) {
+        lane = requestTransitionLane(transition);
+        deferred = true;
+      } else {
+        lane = eventPriorityToLane(resolveUpdatePriority());
+      }
+    }
+    const token = getOrMintBatchToken(lane, deferred);
+    // Minting a token must guarantee a close edge even if the batch never
+    // schedules React work: make sure the scheduling microtask runs.
+    ensureScheduleIsScheduled();
+    return token;
+  },
+  batchesForLanes(lanes: number): mixed {
+    return batchTokensForLanes(lanes as any);
   },
   isTransitionLane(lane: number): boolean {
     return laneIsTransitionLane(lane as any);
@@ -1804,6 +1841,10 @@ function isRenderConsistentWithExternalStores(finishedWork: Fiber): boolean {
 
 function markRootUpdated(root: FiberRoot, updatedLanes: Lanes) {
   _markRootUpdated(root, updatedLanes);
+
+  // External-runtime batch registry (pending edge): one array load + null
+  // check when no external write minted a token for this lane.
+  batchRegistryOnRootUpdated(root, updatedLanes);
 
   if (enableInfiniteRenderLoopDetection) {
     // Check for recursive updates
@@ -3812,6 +3853,11 @@ function commitRoot(
     updatedLanes,
     suspendedRetryLanes,
   );
+
+  // External-runtime batch registry (finish edge): lanes leaving
+  // root.pendingLanes retire their batch tokens, exactly once, at the same
+  // moment React's own books change.
+  batchRegistryOnRootFinished(root, root.pendingLanes);
 
   // Reset this before firing side effects so we can detect recursive updates.
   didIncludeCommitPhaseUpdate = false;

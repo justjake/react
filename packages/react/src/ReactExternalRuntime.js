@@ -48,9 +48,15 @@ import ReactSharedInternals from './ReactSharedInternalsClient';
 import reportGlobalError from 'shared/reportGlobalError';
 
 export type ExternalRuntimeListener = {
-  /** A render pass began on `container` for `renderLanes`. Passes can yield
-   * to the browser and resume; a pass ends by completing or restarting. */
-  onRenderPassStart?: (container: mixed, renderLanes: number) => void,
+  /** A render pass began on `container`. `includedBatches` are the tokens of
+   * every live batch this pass renders (see getCurrentWriteBatch). Passes can
+   * yield to the browser and resume; a pass ends by completing or
+   * restarting. `renderLanes` is the raw lane word, for diagnostics only. */
+  onRenderPassStart?: (
+    container: mixed,
+    includedBatches: $ReadOnlyArray<mixed>,
+    renderLanes: number,
+  ) => void,
   /** The render pass on `container` completed or was discarded. */
   onRenderPassEnd?: (container: mixed) => void,
   /** A commit's host-tree mutations finished; the committed tree is current.
@@ -65,6 +71,11 @@ export type ExternalRuntimeListener = {
   onBeforeMutation?: (container: mixed) => void,
   /** React finished mutating the host tree under `container`. */
   onAfterMutation?: (container: mixed) => void,
+  /** A batch retired — exactly once per token. `committed` is false only for
+   * batches that never produced React work (their writes were external-only);
+   * batches whose React updates were discarded by unmounts still retire
+   * through an ordinary (empty) commit with committed = true. */
+  onBatchRetired?: (token: mixed, committed: boolean) => void,
 };
 
 export type ExternalRuntimeProvider = {
@@ -72,6 +83,12 @@ export type ExternalRuntimeProvider = {
   getRenderContext: () => null | {container: mixed, renderLanes: number},
   /** The lane an update scheduled right now would get. */
   getCurrentUpdateLane: () => number,
+  /** Identity of the batch an external write issued right now belongs to.
+   * The returned token is stable for the batch's life and carries a
+   * `deferred` flag; the call allocates only on the batch's first use. */
+  getCurrentWriteBatch: () => mixed,
+  /** Live batch tokens for a lane word (used for render included-sets). */
+  batchesForLanes: (lanes: number) => mixed,
   isTransitionLane: (lane: number) => boolean,
   lanesInclude: (lanes: number, lane: number) => boolean,
 };
@@ -96,7 +113,11 @@ function emit(event: string, a: mixed, b?: mixed, c?: mixed): void {
 export type ExternalRuntime = {
   providers: Array<ExternalRuntimeProvider>,
   hasListeners: boolean,
-  emitRenderPassStart: (container: mixed, renderLanes: number) => void,
+  emitRenderPassStart: (
+    container: mixed,
+    includedBatches: $ReadOnlyArray<mixed>,
+    renderLanes: number,
+  ) => void,
   emitRenderPassEnd: (container: mixed) => void,
   emitCommit: (
     container: mixed,
@@ -105,13 +126,14 @@ export type ExternalRuntime = {
   ) => void,
   emitBeforeMutation: (container: mixed) => void,
   emitAfterMutation: (container: mixed) => void,
+  emitBatchRetired: (token: mixed, committed: boolean) => void,
 };
 
 const runtime: ExternalRuntime = {
   providers: [],
   hasListeners: false,
-  emitRenderPassStart(container, renderLanes) {
-    emit('onRenderPassStart', container, renderLanes);
+  emitRenderPassStart(container, includedBatches, renderLanes) {
+    emit('onRenderPassStart', container, includedBatches, renderLanes);
   },
   emitRenderPassEnd(container) {
     emit('onRenderPassEnd', container);
@@ -124,6 +146,9 @@ const runtime: ExternalRuntime = {
   },
   emitAfterMutation(container) {
     emit('onAfterMutation', container);
+  },
+  emitBatchRetired(token, committed) {
+    emit('onBatchRetired', token, committed);
   },
 };
 
@@ -160,6 +185,11 @@ export function getExternalRuntimeCurrentUpdateLane(): number {
   // thread; the first registered provider answers. With multiple renderers
   // loaded, lane attribution is best-effort (documented limitation).
   return providers.length > 0 ? providers[0].getCurrentUpdateLane() : 0;
+}
+
+export function getExternalRuntimeCurrentWriteBatch(): mixed {
+  const providers = runtime.providers;
+  return providers.length > 0 ? providers[0].getCurrentWriteBatch() : null;
 }
 
 export function externalRuntimeIsTransitionLane(lane: number): boolean {

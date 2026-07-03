@@ -66,6 +66,7 @@ import {captureOwnerStack} from './ReactOwnerStack';
 import * as ReactCompilerRuntime from './ReactCompilerRuntime';
 import {
   subscribeToExternalRuntime,
+  getExternalRuntimeCurrentWriteBatch,
   getExternalRuntimeRenderContext,
   getExternalRuntimeCurrentUpdateLane,
   externalRuntimeIsTransitionLane,
@@ -128,6 +129,7 @@ export {
   use,
   // External-runtime introspection for external state libraries
   subscribeToExternalRuntime as unstable_subscribeToExternalRuntime,
+  getExternalRuntimeCurrentWriteBatch as unstable_getCurrentWriteBatch,
   getExternalRuntimeRenderContext as unstable_getRenderContext,
   getExternalRuntimeCurrentUpdateLane as unstable_getCurrentUpdateLane,
   externalRuntimeIsTransitionLane as unstable_isTransitionLane,
