@@ -15,7 +15,7 @@ import type {
 } from 'react/src/ReactExternalRuntime';
 
 import ReactSharedInternals from 'shared/ReactSharedInternals';
-import {batchTokensForLanes} from './ReactFiberBatchRegistry';
+import {batchTokensForRender} from './ReactFiberBatchRegistry';
 
 /**
  * Reconciler side of the external-runtime introspection channel (see
@@ -70,7 +70,7 @@ export function notifyRenderPassStart(root: FiberRoot, lanes: Lanes): void {
     if (runtime.hasListeners) {
       runtime.emitRenderPassStart(
         root.containerInfo,
-        batchTokensForLanes(lanes),
+        batchTokensForRender(root, lanes),
       );
     }
   }
