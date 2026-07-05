@@ -79,6 +79,14 @@ type Slot = {
 const slots: Array<Slot | null> = new Array<Slot | null>(31).fill(null);
 let nextTokenSerial = 1;
 
+// Per-root commit generation: how many times each root has committed.
+// Maintained unconditionally (like the rest of the registry's bookkeeping)
+// so the sequence does not depend on when a listener subscribed; delivered
+// with every onRootCommitted event. Consumers use it to key per-root
+// committed state (cosignal spec §4.2 baseline capture, §5.3 per-root
+// committed-batch tables).
+const rootCommitGenerations: WeakMap<FiberRoot, number> = new WeakMap();
+
 function slotFor(lane: Lane): Slot {
   const index = 31 - Math.clz32(lane);
   let slot = slots[index];
@@ -156,16 +164,41 @@ export function batchRegistryBackfillRoot(root: FiberRoot): void {
  * fibers and were pruned from the surviving tree. A token retires exactly
  * once, when its last pending root is done with it.
  *
- * Cost: iterates only slots holding live tokens (typically 0–2).
+ * This edge is also the per-root commit report (spec §4.1 fact 3):
+ * onRootCommitted fires on every commit with the root's new commit
+ * generation and the batches this commit made visible on this root, BEFORE
+ * any retirement the commit causes — a token retires because its last
+ * pending root committed (or pruned) it, so the per-root report is the
+ * cause and the retirement edge its consequence (spec case-11 step 6).
+ * Listeners run between the bookkeeping mutation and the retirement emit;
+ * a write issued inside an onRootCommitted listener for a lane retiring in
+ * this very commit lands on the outgoing token (the registry's ordinary
+ * merge-on-lane-reuse rule already covers reused lanes, and the retirement
+ * edge still fires exactly once, after).
+ *
+ * Cost: iterates only slots holding live tokens (typically 0–2), plus one
+ * WeakMap bump per commit.
  */
 export function batchRegistryOnRootFinished(
   root: FiberRoot,
   finishedLanes: Lanes,
   remainingLanes: Lanes,
 ): void {
+  const previousGeneration = rootCommitGenerations.get(root);
+  const generation =
+    previousGeneration === undefined ? 1 : previousGeneration + 1;
+  rootCommitGenerations.set(root, generation);
+
+  let committedTokens: Array<BatchToken> | null = null;
+  let retirements: Array<{slot: Slot, committed: boolean}> | null = null;
+
   for (let index = 0; index < slots.length; index++) {
     const slot = slots[index];
-    if (slot === null || slot.token === null) {
+    if (slot === null) {
+      continue;
+    }
+    const token = slot.token;
+    if (token === null) {
       continue;
     }
     const lane = 1 << index;
@@ -177,13 +210,28 @@ export function batchRegistryOnRootFinished(
       continue; // this batch never had work on this root
     }
     const committed = (finishedLanes & lane) !== 0;
+    if (committed) {
+      // This commit made the batch's updates visible on this root: part of
+      // the root's committed-batch delta, whether or not the token also
+      // retires here.
+      if (committedTokens === null) {
+        committedTokens = [];
+      }
+      committedTokens.push(token);
+    }
     roots.delete(root);
     if (roots.size === 0) {
-      retireSlot(
+      // Last pending root: the token retires at this commit — but emit the
+      // per-root commit report first (see the function comment).
+      if (retirements === null) {
+        retirements = [];
+      }
+      retirements.push({
         slot,
-        committed ||
+        committed:
+          committed ||
           (slot.committedRoots !== null && slot.committedRoots.size > 0),
-      );
+      });
     } else if (committed) {
       // Committed here, still pending elsewhere: renders on this root must
       // keep including the batch until it fully retires (per-root lock-in).
@@ -191,6 +239,21 @@ export function batchRegistryOnRootFinished(
         slot.committedRoots = new Set();
       }
       slot.committedRoots.add(root);
+    }
+  }
+
+  const runtime = getExternalRuntime();
+  if (runtime !== null && runtime.hasListeners) {
+    runtime.emitRootCommitted(
+      root.containerInfo,
+      committedTokens === null ? [] : committedTokens,
+      generation,
+    );
+  }
+
+  if (retirements !== null) {
+    for (let i = 0; i < retirements.length; i++) {
+      retireSlot(retirements[i].slot, retirements[i].committed);
     }
   }
 }

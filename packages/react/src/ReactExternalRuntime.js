@@ -25,7 +25,11 @@
  *      includes (getRenderContext and the render-pass listener events), so
  *      reads during render can resolve against the matching version;
  *   3. when each batch retires (onBatchRetired, exactly once per token), so
- *      pending versions can be promoted to committed state.
+ *      pending versions can be promoted to committed state — and, because a
+ *      batch spanning several roots commits on each root at its own time,
+ *      when each root commits (onRootCommitted, with the batches that commit
+ *      made visible on that root), so per-root committed views stay
+ *      self-consistent while the batch is still pending elsewhere.
  *
  * Separately, onBeforeMutation/onAfterMutation bracket exactly the window in
  * which React mutates the DOM during a commit, so a MutationObserver can
@@ -79,6 +83,10 @@ import reportGlobalError from 'shared/reportGlobalError';
 // one fails the consumer handshake instead of silently missing events:
 //   1 << 4  pass yield/resume edges + end disposition
 //   1 << 5  per-root commit reporting + baseline-capture ordering
+//           (the onRootCommitted event itself already ships, as the
+//           existence-proof minimal form; the bit flips only when the
+//           full fact — including the spec §4.2 intra-commit ordering
+//           guarantee, fork test 26 — is implemented and pinned)
 //   1 << 6  runInBatch (lane-scoped scheduling)
 //   1 << 7  render lineage ids
 //   1 << 8  discardAllWip
@@ -112,6 +120,22 @@ export type ExternalRuntimeListener = {
    * batches whose React updates were discarded by unmounts still retire
    * through an ordinary (empty) commit with committed = true. */
   onBatchRetired?: (token: number, committed: boolean) => void,
+  /** `container` committed. Fires on every commit of a root, in commit order.
+   * `committedBatches` is the delta this commit adds to the root's
+   * committed-batch table: the tokens of live batches whose updates this
+   * commit made visible on this root, exactly once per (root, batch). A batch
+   * still pending on a root (not rendered by the committing pass) never
+   * appears, and neither does a batch whose updates on this root died with
+   * deleted fibers (pruned): the table reflects what the root's committed
+   * tree actually shows. `rootCommitGeneration` counts this root's commits
+   * (monotonic, per root, starting at 1). Within one commit, this event
+   * precedes the onBatchRetired edges the commit causes: a token retires
+   * BECAUSE its last pending root committed (or pruned) it. */
+  onRootCommitted?: (
+    container: mixed,
+    committedBatches: $ReadOnlyArray<number>,
+    rootCommitGeneration: number,
+  ) => void,
 };
 
 export type ExternalRuntimeProviderMethods = {
@@ -135,7 +159,7 @@ export type ExternalRuntimeProvider = {
 
 const listeners: Set<ExternalRuntimeListener> = new Set();
 
-function emit(event: string, a: mixed, b?: mixed): void {
+function emit(event: string, a: mixed, b?: mixed, c?: mixed): void {
   // Deliver to every listener even if one throws; a listener error must not
   // corrupt React's commit, so it is reported like an uncaught error.
   // (Set#forEach rather than for..of: repo lint bans for..of loops.)
@@ -143,7 +167,7 @@ function emit(event: string, a: mixed, b?: mixed): void {
     const handler = (listener as any)[event];
     if (handler != null) {
       try {
-        handler(a, b);
+        handler(a, b, c);
       } catch (error) {
         reportGlobalError(error);
       }
@@ -166,6 +190,11 @@ export type ExternalRuntime = {
   emitBeforeMutation: (container: mixed) => void,
   emitAfterMutation: (container: mixed) => void,
   emitBatchRetired: (token: number, committed: boolean) => void,
+  emitRootCommitted: (
+    container: mixed,
+    committedBatches: $ReadOnlyArray<number>,
+    rootCommitGeneration: number,
+  ) => void,
 };
 
 const runtime: ExternalRuntime = {
@@ -189,6 +218,9 @@ const runtime: ExternalRuntime = {
   },
   emitBatchRetired(token, committed) {
     emit('onBatchRetired', token, committed);
+  },
+  emitRootCommitted(container, committedBatches, rootCommitGeneration) {
+    emit('onRootCommitted', container, committedBatches, rootCommitGeneration);
   },
 };
 
