@@ -38,7 +38,7 @@ import {batchTokensForRender} from './ReactFiberBatchRegistry';
 // between separately built react and renderer packages.
 const EXTERNAL_RUNTIME_PROTOCOL_VERSION = 1;
 const EXTERNAL_RUNTIME_CAPABILITIES =
-  (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4);
+  (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 8);
 
 export function getExternalRuntime(): ExternalRuntime | null {
   // The runtime exists once the isomorphic `react` module has evaluated.
@@ -84,6 +84,7 @@ export function registerExternalRuntimeProvider(
     getRenderContext: methods.getRenderContext,
     isCurrentWriteDeferred: methods.isCurrentWriteDeferred,
     getCurrentWriteBatch: methods.getCurrentWriteBatch,
+    discardAllWip: methods.discardAllWip,
   });
 }
 
@@ -91,16 +92,38 @@ export function registerExternalRuntimeProvider(
 // closes exactly once — at the commit that lands the pass's tree
 // (notifyRenderPassCommitted) or at the discard that abandons it (the
 // implicit end inside notifyRenderPassStart when a restart/reset throws the
-// work-in-progress away). It does NOT close at render completion: the frame
-// spans yields, suspensions, and the completed-but-uncommitted period (e.g.
-// a commit suspended on resources), so several roots can hold open frames
-// at once even though only one render is ever in progress.
-const rootsWithActivePass: WeakSet<FiberRoot> = new WeakSet();
+// work-in-progress away, or discardAllWorkInProgress). It does NOT close at
+// render completion: the frame spans yields, suspensions, and the
+// completed-but-uncommitted period (e.g. a commit suspended on resources),
+// so several roots can hold open frames at once even though only one render
+// is ever in progress.
+//
+// A strong Set, not a WeakSet: discardAllWorkInProgress must ENUMERATE the
+// open frames, and the scheduler's own root list drops roots whose only
+// remaining work is a suspended pending commit. The strong reference adds no
+// practical leak: a root with an open frame is one React itself still holds
+// — through the root schedule (pending renderable lanes), a pending-commit
+// subscription, a throttle timeout, or a ping listener — and membership ends
+// at the frame's commit/discard edge.
+const rootsWithActivePass: Set<FiberRoot> = new Set();
 // The subset of open frames currently in a yield gap: the work loop
 // returned to the event loop with the tree unfinished. Membership pairs
 // yield/resume exactly — they strictly alternate within a frame, and a
 // frame that closes mid-gap (discarded) simply never resumes.
 const rootsWithYieldedPass: WeakSet<FiberRoot> = new WeakSet();
+
+/**
+ * Every root with an open pass frame, for discardAllWorkInProgress
+ * (reconciler-internal — FiberRoots never cross the userspace boundary).
+ * A fresh array: the caller mutates frame state while iterating.
+ */
+export function getRootsWithOpenPassFrames(): Array<FiberRoot> {
+  const roots: Array<FiberRoot> = [];
+  rootsWithActivePass.forEach(root => {
+    roots.push(root);
+  });
+  return roots;
+}
 
 /**
  * Called from prepareFreshStack: a fresh work-in-progress stack is being

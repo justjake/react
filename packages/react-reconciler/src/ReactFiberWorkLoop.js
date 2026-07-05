@@ -242,6 +242,7 @@ import {
   notifyRenderPassCommitted,
   notifyBeforeMutation,
   notifyAfterMutation,
+  getRootsWithOpenPassFrames,
 } from './ReactFiberExternalRuntime';
 import {
   SelectiveHydrationException,
@@ -930,7 +931,49 @@ registerExternalRuntimeProvider({
     ensureScheduleIsScheduled();
     return token;
   },
+  discardAllWip: discardAllWorkInProgress,
 });
+
+/**
+ * Synchronously abandon every work-in-progress pass on every root (cosignal
+ * spec §4.1 fact 2): the in-progress or yielded render, and every
+ * completed-but-uncommitted tree whose commit is suspended or throttled.
+ * Each open frame closes with the discard disposition before this returns —
+ * afterwards no pass frame is open and no work-in-progress fiber retains
+ * render-minted hook state (interrupted work is unwound on the spot; the
+ * discarded trees can never commit). React re-schedules the abandoned lanes:
+ * a later retry is a fresh pass over the same still-live batches.
+ *
+ * Legal whenever React is not actively rendering or committing on this
+ * thread. Callers inside an effect or a channel listener must defer to a
+ * microtask instead; calling from those phases throws.
+ */
+export function discardAllWorkInProgress(): void {
+  if ((executionContext & (RenderContext | CommitContext)) !== NoContext) {
+    throw new Error(
+      'discardAllWip must not be called while React is rendering or ' +
+        'committing. Defer the call until React has yielded, e.g. in a ' +
+        'microtask.',
+    );
+  }
+  const roots = getRootsWithOpenPassFrames();
+  for (let i = 0; i < roots.length; i++) {
+    const root = roots[i];
+    // The NoLanes reset (the fatal-error precedent): unwinds any
+    // work-in-progress stack, cancels a suspended or throttled pending
+    // commit, and fires this root's pass-end(discard) edge through
+    // notifyRenderPassStart's implicit-end path without opening a new
+    // frame.
+    prepareFreshStack(root, NoLanes);
+    // A canceled pending commit leaves its lanes suspended with nothing
+    // left to wake them (the commit's ready-listener is gone). Ping every
+    // suspended lane so the discarded work re-renders; lanes suspended on
+    // genuinely pending data simply re-suspend and keep their original
+    // ping listeners.
+    markRootPinged(root, root.suspendedLanes);
+    ensureRootIsScheduled(root);
+  }
+}
 
 function requestRetryLane(fiber: Fiber) {
   // This is a fork of `requestUpdateLane` designed specifically for Suspense

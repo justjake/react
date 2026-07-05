@@ -70,6 +70,7 @@ import {
   getExternalRuntimeCurrentWriteBatch,
   getExternalRuntimeRenderContext,
   externalRuntimeProtocol,
+  externalRuntimeDiscardAllWip,
 } from './ReactExternalRuntime';
 
 const Children = {
@@ -132,6 +133,7 @@ export {
   externalRuntimeIsCurrentWriteDeferred as unstable_isCurrentWriteDeferred,
   getExternalRuntimeRenderContext as unstable_getRenderContext,
   externalRuntimeProtocol as unstable_externalRuntimeProtocol,
+  externalRuntimeDiscardAllWip as unstable_discardAllWip,
   // enableScopeAPI
   REACT_SCOPE_TYPE as unstable_Scope,
   // enableTransitionTracing

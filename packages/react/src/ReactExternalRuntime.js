@@ -85,6 +85,10 @@ import reportGlobalError from 'shared/reportGlobalError';
 //           commit/discard edge — onRenderPassEnd carries the
 //           disposition and fires at the commit (before that commit's
 //           onRootCommitted) or at the discard, NOT at render completion
+//   1 << 8  discardAllWip — unstable_discardAllWip synchronously abandons
+//           every work-in-progress pass on every root: each open frame
+//           closes with the discard disposition before the call returns,
+//           and React re-schedules the abandoned lanes as fresh passes
 // Reserved for capabilities this fork plans to add; a stale build lacking
 // one fails the consumer handshake instead of silently missing events:
 //   1 << 5  per-root commit reporting + baseline-capture ordering
@@ -94,10 +98,9 @@ import reportGlobalError from 'shared/reportGlobalError';
 //           guarantee, fork test 26 — is implemented and pinned)
 //   1 << 6  runInBatch (lane-scoped scheduling)
 //   1 << 7  render lineage ids
-//   1 << 8  discardAllWip
 export const EXTERNAL_RUNTIME_PROTOCOL_VERSION = 1;
 export const EXTERNAL_RUNTIME_CAPABILITIES =
-  (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4);
+  (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 8);
 
 export type ExternalRuntimeProtocol = {
   version: number,
@@ -174,6 +177,12 @@ export type ExternalRuntimeProviderMethods = {
    * a non-zero integer, stable for the batch's life, with the deferred
    * classification in its low bit (`token & 1`). Never allocates. */
   getCurrentWriteBatch: () => number,
+  /** Synchronously abandon every work-in-progress pass on every root this
+   * renderer manages: every open pass frame closes with the discard
+   * disposition before this returns, and the abandoned lanes are
+   * re-scheduled as fresh passes. Throws if called while the renderer is
+   * rendering or committing. */
+  discardAllWip: () => void,
 };
 
 export type ExternalRuntimeProvider = {
@@ -323,4 +332,13 @@ export function getExternalRuntimeCurrentWriteBatch(): number {
   // 0 = "no batch": no renderer has registered a provider (e.g. no renderer
   // module has loaded yet), so a write issued now precedes any React batch.
   return providers.length > 0 ? providers[0].getCurrentWriteBatch() : 0;
+}
+
+export function externalRuntimeDiscardAllWip(): void {
+  // Unlike the write-classification reads above, this addresses every
+  // renderer: each one abandons its own work in progress.
+  const providers = runtime.providers;
+  for (let i = 0; i < providers.length; i++) {
+    providers[i].discardAllWip();
+  }
 }

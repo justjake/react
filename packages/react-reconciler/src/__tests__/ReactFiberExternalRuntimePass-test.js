@@ -463,14 +463,15 @@ describe('ReactFiberExternalRuntimePass', () => {
       expect(commitOffset).not.toBe(-1);
       expect(endOffset).toBeLessThan(commitOffset);
       expect(tail[endOffset].committed).toBe(false); // the discard edge
-      expect(frameEventsFor(events, container, yieldedIndex + 1).slice(0, 5))
-        .toEqual([
-          'yield', // the open pass parked in its gap
-          'end(discard)', // …is discarded by the urgent restart, mid-gap…
-          'start',
-          'end(commit)', // …and only the urgent pass's own close commits…
-          'rootCommitted', // …immediately before the reported advance.
-        ]);
+      expect(
+        frameEventsFor(events, container, yieldedIndex + 1).slice(0, 5),
+      ).toEqual([
+        'yield', // the open pass parked in its gap
+        'end(discard)', // …is discarded by the urgent restart, mid-gap…
+        'start',
+        'end(commit)', // …and only the urgent pass's own close commits…
+        'rootCommitted', // …immediately before the reported advance.
+      ]);
 
       // The urgent commit exposes only the urgent batch; the discarded
       // pass's transition batch stays out of the committed view.
@@ -709,9 +710,7 @@ describe('ReactFiberExternalRuntimePass', () => {
     // canceled), before the urgent commit's view advance.
     const discardIndex = events.log.findIndex(
       (e, i) =>
-        i > completedIndex &&
-        e.type === 'passEnd' &&
-        e.container === container,
+        i > completedIndex && e.type === 'passEnd' && e.container === container,
     );
     expect(discardIndex).not.toBe(-1);
     expect(events.log[discardIndex].committed).toBe(false);
@@ -754,6 +753,136 @@ describe('ReactFiberExternalRuntimePass', () => {
     );
     expect(closesAfterRestart).toEqual([
       {type: 'passEnd', container, committed: true},
+    ]);
+    expect(checkFrameInvariants(events.log)).toEqual([]);
+    unsubscribe();
+  });
+
+  // Spec test 27: unstable_discardAllWip synchronously abandons every WIP
+  // pass on every root — a pass parked mid-render in a yield gap AND a
+  // completed-but-uncommitted pass whose commit is suspended on resources —
+  // firing each frame's end(discard) edge before it returns and starting
+  // nothing new. The abandoned batches stay live; React re-schedules them,
+  // and every later retry is a FRESH pass (a new passStart over the same
+  // tokens) that commits normally. A second call with nothing in flight is
+  // a no-op.
+  // @gate enableViewTransition
+  it('discardAllWip synchronously closes every open frame on every root; retries are fresh passes', async () => {
+    const {events, unsubscribe} = subscribe();
+    let setValue;
+    function AppA() {
+      const [value, _setValue] = useState(0);
+      setValue = _setValue;
+      return (
+        <>
+          <Text text={`a${value}`} />
+          <Text text={`b${value}`} />
+          <Text text={`c${value}`} />
+        </>
+      );
+    }
+    let setSrc;
+    function AppB() {
+      const [src, _setSrc] = useState(null);
+      setSrc = _setSrc;
+      return (
+        <ViewTransition>
+          <Text text={src === null ? 'empty' : `showing ${src}`} />
+          {src !== null ? (
+            <suspensey-thing
+              src={src}
+              onLoadStart={() => Scheduler.log(`load ${src}`)}
+            />
+          ) : null}
+        </ViewTransition>
+      );
+    }
+    const rootA = ReactNoop.createRoot();
+    await act(() => {
+      rootA.render(<AppA />);
+    });
+    assertLog(['a0', 'b0', 'c0']);
+    const containerA = events.passes[0].container;
+    const rootB = ReactNoop.createRoot();
+    await act(() => {
+      rootB.render(<AppB />);
+    });
+    assertLog(['empty']);
+    const containerB = events.passes[events.passes.length - 1].container;
+    expect(containerB).not.toBe(containerA);
+
+    // Root B: completed pass, commit suspended on the image — frame open.
+    let tB = null;
+    await act(() => {
+      startTransition(() => {
+        tB = React.unstable_getCurrentWriteBatch();
+        setSrc('X');
+      });
+    });
+    assertLog(['showing X', 'load X']);
+    expect(ReactNoop.getSuspenseyThingStatus('X')).toBe('pending');
+    expect(events.commits.length).toBe(2); // the two mounts only
+
+    let tA = null;
+    await act(async () => {
+      // Root A: transition parked mid-render in a yield gap — frame open.
+      startTransition(() => {
+        tA = React.unstable_getCurrentWriteBatch();
+        setValue(1);
+      });
+      await waitFor(['a1']);
+
+      // Discard everything, synchronously: exactly two events appear
+      // before the call returns — one end(discard) per open frame — and
+      // nothing new has started or committed.
+      const logLengthBefore = events.log.length;
+      React.unstable_discardAllWip();
+      const discardEvents = events.log.slice(logLengthBefore);
+      expect(discardEvents.length).toBe(2);
+      discardEvents.forEach(e => {
+        expect(e.type).toBe('passEnd');
+        expect(e.committed).toBe(false);
+      });
+      expect(new Set(discardEvents.map(e => e.container))).toEqual(
+        new Set([containerA, containerB]),
+      );
+      expect(events.commits.length).toBe(2);
+      // The batches themselves stay live: nothing retired.
+      expect(events.retired.length).toBe(0);
+
+      // With no frame open, a second call is a no-op.
+      React.unstable_discardAllWip();
+      expect(events.log.length).toBe(logLengthBefore + 2);
+
+      // React re-schedules the abandoned lanes: each root retries as a
+      // FRESH pass over the same still-live batch. Root A's retry renders
+      // from scratch and commits; root B's re-suspends its commit on the
+      // still-pending image.
+      await waitForAll(['a1', 'b1', 'c1', 'showing X']);
+    });
+    const aPasses = events.passes.filter(p => p.included.includes(tA));
+    expect(aPasses.length).toBe(2); // original + post-discard fresh pass
+    const bPasses = events.passes.filter(p => p.included.includes(tB));
+    expect(bPasses.length).toBe(2);
+    const aCommits = events.commits.filter(c => c.tokens.includes(tA));
+    expect(aCommits.length).toBe(1);
+    expect(aCommits[0].container).toBe(containerA);
+    expect(events.retired.filter(r => r.token === tA)).toEqual([
+      {type: 'retired', token: tA, committed: true},
+    ]);
+    expect(events.retired.map(r => r.token)).not.toContain(tB);
+
+    // The image resolves: root B's retried pass commits — its frame closes
+    // with the commit disposition, only now.
+    await act(() => {
+      ReactNoop.resolveSuspenseyThing('X');
+    });
+    assertLog([]);
+    const bCommits = events.commits.filter(c => c.tokens.includes(tB));
+    expect(bCommits.length).toBe(1);
+    expect(bCommits[0].container).toBe(containerB);
+    expect(events.retired.filter(r => r.token === tB)).toEqual([
+      {type: 'retired', token: tB, committed: true},
     ]);
     expect(checkFrameInvariants(events.log)).toEqual([]);
     unsubscribe();

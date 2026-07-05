@@ -588,5 +588,6 @@
   "600": "A rejected Promise was passed to React without a `reason` property. React threw a generic error from where the Promise was used to assist in identifying the problematic Promise. Make sure that instrumented Promises correctly set the `reason` property when setting `status` to `'rejected'`.",
   "601": "A chunk pair is incomplete. This is a bug in React.",
   "602": "This renderer was built with external-runtime protocol v%s, but the react package it loaded does not provide the external-runtime registry. The react package and the renderer must come from the same cosignal fork build.",
-  "603": "External-runtime protocol version skew: the react package speaks v%s but this renderer was built for v%s. The react package and the renderer must come from the same cosignal fork build."
+  "603": "External-runtime protocol version skew: the react package speaks v%s but this renderer was built for v%s. The react package and the renderer must come from the same cosignal fork build.",
+  "604": "discardAllWip must not be called while React is rendering or committing. Defer the call until React has yielded, e.g. in a microtask."
 }

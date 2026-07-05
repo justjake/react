@@ -42,6 +42,7 @@ export {
   unstable_getCurrentWriteBatch,
   unstable_isCurrentWriteDeferred,
   unstable_getRenderContext,
+  unstable_discardAllWip,
   useId,
   useCallback,
   useContext,
