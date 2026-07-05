@@ -11,7 +11,7 @@ import type {FiberRoot} from './ReactInternalTypes';
 import type {Lanes} from './ReactFiberLane';
 import type {
   ExternalRuntime,
-  ExternalRuntimeProvider,
+  ExternalRuntimeProviderMethods,
 } from 'react/src/ReactExternalRuntime';
 
 import ReactSharedInternals from 'shared/ReactSharedInternals';
@@ -28,20 +28,62 @@ import {batchTokensForRender} from './ReactFiberBatchRegistry';
  * No Fiber or FiberRoot shapes cross this boundary.
  */
 
+// The protocol version + capability bits THIS reconciler build implements.
+// Deliberately a duplicated copy of the constants in
+// packages/react/src/ReactExternalRuntime.js (which also documents the bit
+// assignments), NOT a value import: a value import would be inlined into the
+// renderer bundle at build time either way, and keeping the copy explicit
+// makes it obvious that each artifact bakes its own numbers — which is
+// exactly what lets registerExternalRuntimeProvider detect version skew
+// between separately built react and renderer packages.
+const EXTERNAL_RUNTIME_PROTOCOL_VERSION = 1;
+const EXTERNAL_RUNTIME_CAPABILITIES = (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3);
+
 export function getExternalRuntime(): ExternalRuntime | null {
   // The runtime exists once the isomorphic `react` module has evaluated.
-  // It is null with mismatched react/renderer versions; every entry point
-  // here tolerates that by doing nothing.
+  // Registration below refuses mismatched react/renderer pairs loudly, so
+  // the emit paths can only observe null before registration has run; they
+  // tolerate that by doing nothing.
   return (ReactSharedInternals as any).E || null;
 }
 
 export function registerExternalRuntimeProvider(
-  provider: ExternalRuntimeProvider,
+  methods: ExternalRuntimeProviderMethods,
 ): void {
+  // The versioned handshake, renderer side (cosignal spec §4.1 fact 7).
+  // Failing loudly here is the point: pairing this renderer with a react
+  // package that lacks the registry (stock React) or speaks a different
+  // protocol version must not silently degrade into a mode where every
+  // external write classifies as "no batch".
   const runtime = getExternalRuntime();
-  if (runtime !== null) {
-    runtime.providers.push(provider);
+  if (runtime === null || runtime.protocol == null) {
+    throw new Error(
+      'This renderer was built with external-runtime protocol v' +
+        EXTERNAL_RUNTIME_PROTOCOL_VERSION +
+        ', but the react package it loaded does not provide the ' +
+        'external-runtime registry. The react package and the renderer ' +
+        'must come from the same cosignal fork build.',
+    );
   }
+  if (runtime.protocol.version !== EXTERNAL_RUNTIME_PROTOCOL_VERSION) {
+    throw new Error(
+      'External-runtime protocol version skew: the react package speaks v' +
+        runtime.protocol.version +
+        ' but this renderer was built for v' +
+        EXTERNAL_RUNTIME_PROTOCOL_VERSION +
+        '. The react package and the renderer must come from the same ' +
+        'cosignal fork build.',
+    );
+  }
+  runtime.providers.push({
+    protocol: {
+      version: EXTERNAL_RUNTIME_PROTOCOL_VERSION,
+      capabilities: EXTERNAL_RUNTIME_CAPABILITIES,
+    },
+    getRenderContext: methods.getRenderContext,
+    isCurrentWriteDeferred: methods.isCurrentWriteDeferred,
+    getCurrentWriteBatch: methods.getCurrentWriteBatch,
+  });
 }
 
 // Roots with a render pass currently in progress (spanning yields). Used to

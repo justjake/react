@@ -302,4 +302,47 @@ describe('ReactFiberBatchRegistry', () => {
     ]);
     unsubscribe();
   });
+
+  describe('protocol handshake', () => {
+    const CAPABILITIES_V1 = (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3);
+
+    function getSharedInternals(ReactModule) {
+      return ReactModule.__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE;
+    }
+
+    it('exposes version and capability bits on both sides of the channel', () => {
+      const protocol = React.unstable_externalRuntimeProtocol;
+      expect(protocol.version).toBe(1);
+      expect(protocol.capabilities).toBe(CAPABILITIES_V1);
+      // The renderer (required in beforeEach) registered a provider echoing
+      // the version and capabilities its reconciler was built with.
+      expect(protocol.providerProtocols).toEqual([
+        {version: 1, capabilities: CAPABILITIES_V1},
+      ]);
+    });
+
+    it('a renderer refuses to load against a react package without the registry (no silent no-op)', () => {
+      jest.resetModules();
+      const FreshReact = require('react');
+      // Simulate version skew: a react package that never created the
+      // external-runtime registry (stock React, or a pre-protocol build).
+      getSharedInternals(FreshReact).E = null;
+      expect(() => require('react-noop-renderer')).toThrow(
+        /does not provide the external-runtime registry/,
+      );
+    });
+
+    it('a renderer refuses to load across a protocol version mismatch (fails loudly)', () => {
+      jest.resetModules();
+      const FreshReact = require('react');
+      // Simulate a react package built for a future protocol version.
+      getSharedInternals(FreshReact).E.protocol = {
+        version: 2,
+        capabilities: 0,
+      };
+      expect(() => require('react-noop-renderer')).toThrow(
+        /protocol version skew: the react package speaks v2 but this renderer was built for v1/,
+      );
+    });
+  });
 });

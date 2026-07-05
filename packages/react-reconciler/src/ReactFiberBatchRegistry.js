@@ -94,7 +94,10 @@ function slotFor(lane: Lane): Slot {
  * to, minting it on first use. `lane` is what requestUpdateLane would assign;
  * `isDeferred` classifies it (transition-like or not).
  */
-export function getOrMintBatchToken(lane: Lane, isDeferred: boolean): BatchToken {
+export function getOrMintBatchToken(
+  lane: Lane,
+  isDeferred: boolean,
+): BatchToken {
   const slot = slotFor(lane);
   if (slot.token === null) {
     slot.token = nextTokenSerial++ * 2 + (isDeferred ? 1 : 0);
@@ -217,7 +220,7 @@ export function batchRegistryOnEventClosed(): void {
     ) {
       continue;
     }
-    if ((slot.token & 1) === 1 && (1 << i) === actionLane) {
+    if ((slot.token & 1) === 1 && 1 << i === actionLane) {
       const actionThenable = peekEntangledActionThenable();
       if (actionThenable !== null) {
         parkUntilActionSettles(slot, actionThenable);

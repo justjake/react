@@ -69,6 +69,7 @@ import {
   externalRuntimeIsCurrentWriteDeferred,
   getExternalRuntimeCurrentWriteBatch,
   getExternalRuntimeRenderContext,
+  externalRuntimeProtocol,
 } from './ReactExternalRuntime';
 
 const Children = {
@@ -130,6 +131,7 @@ export {
   getExternalRuntimeCurrentWriteBatch as unstable_getCurrentWriteBatch,
   externalRuntimeIsCurrentWriteDeferred as unstable_isCurrentWriteDeferred,
   getExternalRuntimeRenderContext as unstable_getRenderContext,
+  externalRuntimeProtocol as unstable_externalRuntimeProtocol,
   // enableScopeAPI
   REACT_SCOPE_TYPE as unstable_Scope,
   // enableTransitionTracing
