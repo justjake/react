@@ -79,9 +79,14 @@ import reportGlobalError from 'shared/reportGlobalError';
 //                                 flag and async-action parking (fact 3)
 //   1 << 3  mutation window     — before/after host-mutation bracket
 //                                 (fact 6)
+//   1 << 4  pass yield/resume edges + end disposition (fact 2, the frame
+//           half): onRenderPassYield/onRenderPassResume around
+//           time-slicing gaps, and the pass frame closing at the
+//           commit/discard edge — onRenderPassEnd carries the
+//           disposition and fires at the commit (before that commit's
+//           onRootCommitted) or at the discard, NOT at render completion
 // Reserved for capabilities this fork plans to add; a stale build lacking
 // one fails the consumer handshake instead of silently missing events:
-//   1 << 4  pass yield/resume edges + end disposition
 //   1 << 5  per-root commit reporting + baseline-capture ordering
 //           (the onRootCommitted event itself already ships, as the
 //           existence-proof minimal form; the bit flips only when the
@@ -92,7 +97,7 @@ import reportGlobalError from 'shared/reportGlobalError';
 //   1 << 8  discardAllWip
 export const EXTERNAL_RUNTIME_PROTOCOL_VERSION = 1;
 export const EXTERNAL_RUNTIME_CAPABILITIES =
-  (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3);
+  (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4);
 
 export type ExternalRuntimeProtocol = {
   version: number,
@@ -100,16 +105,37 @@ export type ExternalRuntimeProtocol = {
 };
 
 export type ExternalRuntimeListener = {
-  /** A render pass began on `container`. `includedBatches` are the tokens of
-   * every live batch this pass renders (see getCurrentWriteBatch). Passes can
-   * yield to the browser and resume; a pass ends by completing or
-   * restarting. */
+  /** A render pass began on `container`, opening its pass FRAME.
+   * `includedBatches` are the tokens of every live batch this pass renders
+   * (see getCurrentWriteBatch). The frame stays open across yields
+   * (onRenderPassYield/onRenderPassResume) and across the
+   * completed-but-uncommitted period (e.g. a commit suspended on resources),
+   * and closes exactly once, at onRenderPassEnd. "In render" is per
+   * callstack, NOT per frame: code running in a yield gap or while a
+   * completed tree waits to commit observes getRenderContext() === null even
+   * though the frame is open — keying any decision to the wall-clock
+   * [start, end) interval is wrong. */
   onRenderPassStart?: (
     container: mixed,
     includedBatches: $ReadOnlyArray<number>,
   ) => void,
-  /** The render pass on `container` completed or was discarded. */
-  onRenderPassEnd?: (container: mixed) => void,
+  /** The pass on `container` yielded to the event loop with its tree
+   * unfinished; the frame stays open. Fires at most once per gap:
+   * yield/resume strictly alternate within a frame. */
+  onRenderPassYield?: (container: mixed) => void,
+  /** The yielded pass on `container` re-entered the work loop. Always
+   * paired with a preceding onRenderPassYield; a discarded yielded pass
+   * ends (committed = false) without a resume. */
+  onRenderPassResume?: (container: mixed) => void,
+  /** The pass frame on `container` closed — exactly once per frame.
+   * `committed` is true when the frame closes because its tree is being
+   * committed: it fires inside that commit, BEFORE the commit's
+   * onRootCommitted report (no committed-view advance happens on a root
+   * while a pass frame on that root is open). `committed` is false when the
+   * pass was discarded — a restart (a fresh onRenderPassStart on the same
+   * root follows), an interrupted suspended render, a canceled pending
+   * commit, or discardAllWip — and the pass's tree can never later commit. */
+  onRenderPassEnd?: (container: mixed, committed: boolean) => void,
   /** React is about to mutate the host tree under `container`. Fires only
    * when there are mutations to apply. */
   onBeforeMutation?: (container: mixed) => void,
@@ -186,7 +212,9 @@ export type ExternalRuntime = {
     container: mixed,
     includedBatches: $ReadOnlyArray<number>,
   ) => void,
-  emitRenderPassEnd: (container: mixed) => void,
+  emitRenderPassYield: (container: mixed) => void,
+  emitRenderPassResume: (container: mixed) => void,
+  emitRenderPassEnd: (container: mixed, committed: boolean) => void,
   emitBeforeMutation: (container: mixed) => void,
   emitAfterMutation: (container: mixed) => void,
   emitBatchRetired: (token: number, committed: boolean) => void,
@@ -207,8 +235,14 @@ const runtime: ExternalRuntime = {
   emitRenderPassStart(container, includedBatches) {
     emit('onRenderPassStart', container, includedBatches);
   },
-  emitRenderPassEnd(container) {
-    emit('onRenderPassEnd', container);
+  emitRenderPassYield(container) {
+    emit('onRenderPassYield', container);
+  },
+  emitRenderPassResume(container) {
+    emit('onRenderPassResume', container);
+  },
+  emitRenderPassEnd(container, committed) {
+    emit('onRenderPassEnd', container, committed);
   },
   emitBeforeMutation(container) {
     emit('onBeforeMutation', container);

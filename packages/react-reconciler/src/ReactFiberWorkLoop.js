@@ -237,7 +237,9 @@ import {
 import {
   registerExternalRuntimeProvider,
   notifyRenderPassStart,
-  notifyRenderPassEnd,
+  notifyRenderPassYield,
+  notifyRenderPassResume,
+  notifyRenderPassCommitted,
   notifyBeforeMutation,
   notifyAfterMutation,
 } from './ReactFiberExternalRuntime';
@@ -2723,6 +2725,13 @@ function renderRootSync(
 
     workInProgressTransitions = getTransitionsForLanes(root, lanes);
     prepareFreshStack(root, lanes);
+  } else {
+    // Continuing the in-progress pass synchronously (e.g. a yielded
+    // concurrent pass being finished after expiration or flushSync, or a
+    // stack the caller prepared right before this call). If the pass had
+    // yielded, this re-entry resumes it; a just-prepared stack never
+    // yielded and emits nothing.
+    notifyRenderPassResume(root);
   }
 
   if (enableSchedulingProfiler) {
@@ -2825,6 +2834,11 @@ function renderRootSync(
   if (workInProgress !== null) {
     // Did not complete the tree. This can happen if something suspended in
     // the shell.
+
+    // External-runtime lifecycle: the pass yields to the event loop with
+    // the tree unfinished. Its frame stays open; code running in the gap
+    // observes "not in render" (per-callstack truth).
+    notifyRenderPassYield(root);
   } else {
     // Normal case. We completed the whole tree.
 
@@ -2835,8 +2849,10 @@ function renderRootSync(
     // It's safe to process the queue now that the render phase is complete.
     finishQueueingConcurrentUpdates();
 
-    // External-runtime lifecycle: the render pass is over.
-    notifyRenderPassEnd(root);
+    // External-runtime lifecycle: nothing to emit — the pass frame stays
+    // open through the completed-but-uncommitted period and closes at the
+    // commit (notifyRenderPassCommitted in commitRoot) or at the discard
+    // (the implicit end when a fresh stack throws this tree away).
   }
 
   return exitStatus;
@@ -2886,6 +2902,9 @@ function renderRootConcurrent(root: FiberRoot, lanes: Lanes): RootExitStatus {
     // If we were previously in prerendering mode, check if we received any new
     // data during an interleaved event.
     workInProgressRootIsPrerendering = checkIfRootIsPrerendering(root, lanes);
+
+    // External-runtime lifecycle: the yielded pass re-enters the work loop.
+    notifyRenderPassResume(root);
   }
 
   if (enableSchedulingProfiler) {
@@ -3108,6 +3127,12 @@ function renderRootConcurrent(root: FiberRoot, lanes: Lanes): RootExitStatus {
     if (enableSchedulingProfiler) {
       markRenderYielded();
     }
+
+    // External-runtime lifecycle: the pass yields to the event loop with
+    // the tree unfinished. Its frame stays open; code running in the gap
+    // observes "not in render" (per-callstack truth).
+    notifyRenderPassYield(root);
+
     return RootInProgress;
   } else {
     // Completed the tree.
@@ -3122,8 +3147,10 @@ function renderRootConcurrent(root: FiberRoot, lanes: Lanes): RootExitStatus {
     // It's safe to process the queue now that the render phase is complete.
     finishQueueingConcurrentUpdates();
 
-    // External-runtime lifecycle: the render pass is over.
-    notifyRenderPassEnd(root);
+    // External-runtime lifecycle: nothing to emit — the pass frame stays
+    // open through the completed-but-uncommitted period and closes at the
+    // commit (notifyRenderPassCommitted in commitRoot) or at the discard
+    // (the implicit end when a fresh stack throws this tree away).
 
     // Return the final exit status.
     return workInProgressRootExitStatus;
@@ -3854,6 +3881,12 @@ function commitRoot(
     updatedLanes,
     suspendedRetryLanes,
   );
+
+  // External-runtime lifecycle: the committing pass's frame closes here,
+  // disposition commit — before the finish edge below reports this commit's
+  // committed-view advance, so no listener ever observes a same-root
+  // committed-view advance while a same-root pass frame is open.
+  notifyRenderPassCommitted(root);
 
   // External-runtime batch registry (finish edge): lanes leaving
   // root.pendingLanes retire their batch tokens, exactly once, at the same

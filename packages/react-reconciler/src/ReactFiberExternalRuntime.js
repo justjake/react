@@ -37,7 +37,8 @@ import {batchTokensForRender} from './ReactFiberBatchRegistry';
 // exactly what lets registerExternalRuntimeProvider detect version skew
 // between separately built react and renderer packages.
 const EXTERNAL_RUNTIME_PROTOCOL_VERSION = 1;
-const EXTERNAL_RUNTIME_CAPABILITIES = (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3);
+const EXTERNAL_RUNTIME_CAPABILITIES =
+  (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4);
 
 export function getExternalRuntime(): ExternalRuntime | null {
   // The runtime exists once the isomorphic `react` module has evaluated.
@@ -86,14 +87,26 @@ export function registerExternalRuntimeProvider(
   });
 }
 
-// Roots with a render pass currently in progress (spanning yields). Used to
-// pair start/end events exactly even when a pass is discarded by a restart.
+// Roots with an open pass FRAME. A frame opens at prepareFreshStack and
+// closes exactly once — at the commit that lands the pass's tree
+// (notifyRenderPassCommitted) or at the discard that abandons it (the
+// implicit end inside notifyRenderPassStart when a restart/reset throws the
+// work-in-progress away). It does NOT close at render completion: the frame
+// spans yields, suspensions, and the completed-but-uncommitted period (e.g.
+// a commit suspended on resources), so several roots can hold open frames
+// at once even though only one render is ever in progress.
 const rootsWithActivePass: WeakSet<FiberRoot> = new WeakSet();
+// The subset of open frames currently in a yield gap: the work loop
+// returned to the event loop with the tree unfinished. Membership pairs
+// yield/resume exactly — they strictly alternate within a frame, and a
+// frame that closes mid-gap (discarded) simply never resumes.
+const rootsWithYieldedPass: WeakSet<FiberRoot> = new WeakSet();
 
 /**
  * Called from prepareFreshStack: a fresh work-in-progress stack is being
- * prepared for `root`. Any pass previously active on this root is implicitly
- * over (its partial tree was discarded). `lanes` is NoLanes when the stack is
+ * prepared for `root`. Any frame previously open on this root is implicitly
+ * over (its tree — partial, or completed but never committed — was
+ * discarded and can never commit). `lanes` is NoLanes when the stack is
  * reset without starting new work (e.g. interrupting a suspended render).
  */
 export function notifyRenderPassStart(root: FiberRoot, lanes: Lanes): void {
@@ -103,8 +116,9 @@ export function notifyRenderPassStart(root: FiberRoot, lanes: Lanes): void {
   }
   if (rootsWithActivePass.has(root)) {
     rootsWithActivePass.delete(root);
+    rootsWithYieldedPass.delete(root);
     if (runtime.hasListeners) {
-      runtime.emitRenderPassEnd(root.containerInfo);
+      runtime.emitRenderPassEnd(root.containerInfo, false);
     }
   }
   if (lanes !== 0) {
@@ -119,19 +133,65 @@ export function notifyRenderPassStart(root: FiberRoot, lanes: Lanes): void {
 }
 
 /**
- * Called when the render phase for `root` completed (the work loop finished
- * the whole tree — committed or not). Idempotent: yielded passes that resume
- * end exactly once.
+ * Called when the work loop returns control to the event loop with `root`'s
+ * tree unfinished (time-slicing, or a suspension the loop is waiting out).
+ * The frame stays open; code that runs in the gap observes "not in render"
+ * (getRenderContext() === null) — truth is per callstack, not per frame.
+ * The membership guard makes a double yield (two yields with no resume,
+ * restart, or commit between) structurally unemittable.
  */
-export function notifyRenderPassEnd(root: FiberRoot): void {
+export function notifyRenderPassYield(root: FiberRoot): void {
+  const runtime = getExternalRuntime();
+  if (runtime === null) {
+    return;
+  }
+  if (rootsWithActivePass.has(root) && !rootsWithYieldedPass.has(root)) {
+    rootsWithYieldedPass.add(root);
+    if (runtime.hasListeners) {
+      runtime.emitRenderPassYield(root.containerInfo);
+    }
+  }
+}
+
+/**
+ * Called when the work loop re-enters an in-progress pass on `root` without
+ * preparing a fresh stack (the same-root-same-lanes continuation path, sync
+ * or concurrent). Emits only if the frame actually yielded: a stack the
+ * caller prepared explicitly right before rendering takes the same entry
+ * path but never yielded, and pairing is exact.
+ */
+export function notifyRenderPassResume(root: FiberRoot): void {
+  const runtime = getExternalRuntime();
+  if (runtime === null) {
+    return;
+  }
+  if (rootsWithYieldedPass.has(root)) {
+    rootsWithYieldedPass.delete(root);
+    if (runtime.hasListeners) {
+      runtime.emitRenderPassResume(root.containerInfo);
+    }
+  }
+}
+
+/**
+ * Called from commitRoot, after React's own bookkeeping marks the committed
+ * lanes finished and BEFORE the batch registry reports the committed-view
+ * advance (onRootCommitted) that commit causes: the committing pass's frame
+ * closes, disposition commit, so no listener ever observes a same-root
+ * committed-view advance while a same-root frame is open. The membership
+ * guard keeps the close exactly-once even if a commit path runs for a root
+ * whose frame a restart already discarded.
+ */
+export function notifyRenderPassCommitted(root: FiberRoot): void {
   const runtime = getExternalRuntime();
   if (runtime === null) {
     return;
   }
   if (rootsWithActivePass.has(root)) {
     rootsWithActivePass.delete(root);
+    rootsWithYieldedPass.delete(root);
     if (runtime.hasListeners) {
-      runtime.emitRenderPassEnd(root.containerInfo);
+      runtime.emitRenderPassEnd(root.containerInfo, true);
     }
   }
 }

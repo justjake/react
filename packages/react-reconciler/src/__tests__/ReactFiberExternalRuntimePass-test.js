@@ -9,22 +9,24 @@
  */
 
 /**
- * Existence proofs for the pass/commit serialization and insertion facts of
- * the external-runtime protocol (cosignal spec §4.1 facts 2 and 4, §4.4
- * tests 22, 24, 28): a same-root commit never happens while an older
- * same-root pass is still in flight (React discards the pass first and
- * restarts it after), and work inserted after a pass has completed — but not
- * yet committed — forces a pre-commit restart rather than committing the
- * stale tree.
+ * The pass-lifecycle facts of the external-runtime protocol (cosignal spec
+ * §4.1 fact 2, §4.4 tests 7–10, 21–22, 24, 27–28), plus the pass/commit
+ * serialization and insertion existence proofs those edges formalize.
  *
- * Channel semantics pinned here (current generation): a pass frame opens at
- * onRenderPassStart and closes at onRenderPassEnd, which fires when the
- * render loop completes the tree (before the commit) or implicitly when a
- * restart discards the work-in-progress. The planned yield/resume +
- * end-disposition edges (spec fact 2, session S3) will extend the frame to
- * the commit/discard edge; the serialization fact proven below — the
- * discard edge always precedes any same-root committed-view advance — is
- * what that extension builds on.
+ * Channel semantics pinned here: a pass FRAME opens at onRenderPassStart
+ * and closes exactly once at onRenderPassEnd(container, committed), which
+ * fires at the commit that lands the pass's tree (committed = true, inside
+ * that commit and before its onRootCommitted report) or at the discard
+ * that abandons it (committed = false: a restart's implicit end, an
+ * interrupted suspended render, a canceled pending commit) — NOT at render
+ * completion. The frame spans onRenderPassYield/onRenderPassResume gaps
+ * (strictly alternating) and the completed-but-uncommitted period (e.g. a
+ * commit suspended on resources). Truth about "in render" stays per
+ * callstack: code running in a yield gap or while a completed tree waits
+ * to commit observes getRenderContext() === null even though the frame is
+ * open. Serialization fact: no same-root committed-view advance while a
+ * same-root frame is open — a same-root commit implies the frame closed
+ * (commit for its own tree, discard for anything older).
  */
 
 'use strict';
@@ -79,8 +81,14 @@ describe('ReactFiberExternalRuntimePass', () => {
         events.log.push(entry);
         events.passes.push(entry);
       },
-      onRenderPassEnd(container) {
-        events.log.push({type: 'passEnd', container});
+      onRenderPassYield(container) {
+        events.log.push({type: 'passYield', container});
+      },
+      onRenderPassResume(container) {
+        events.log.push({type: 'passResume', container});
+      },
+      onRenderPassEnd(container, committed) {
+        events.log.push({type: 'passEnd', container, committed});
       },
       onRootCommitted(container, committedBatches, rootCommitGeneration) {
         const entry = {
@@ -100,6 +108,293 @@ describe('ReactFiberExternalRuntimePass', () => {
     });
     return {events, unsubscribe};
   }
+
+  // Events for one container, in order, as compact strings — the shape most
+  // assertions below want.
+  function frameEventsFor(events, container, fromIndex = 0) {
+    const out = [];
+    for (let i = fromIndex; i < events.log.length; i++) {
+      const e = events.log[i];
+      if (e.container !== container) {
+        continue;
+      }
+      if (e.type === 'passEnd') {
+        out.push(e.committed ? 'end(commit)' : 'end(discard)');
+      } else if (e.type === 'passStart') {
+        out.push('start');
+      } else if (e.type === 'passYield') {
+        out.push('yield');
+      } else if (e.type === 'passResume') {
+        out.push('resume');
+      } else if (e.type === 'rootCommitted') {
+        out.push('rootCommitted');
+      }
+    }
+    return out;
+  }
+
+  // Replays an event log against the pass-frame state machine the protocol
+  // guarantees, per container:
+  //
+  //   closed --start--> open --yield--> yielded --resume--> open
+  //   open|yielded --end(commit|discard)--> closed
+  //
+  // plus: every rootCommitted arrives with the frame CLOSED, consuming the
+  // end(commit) that closed it (so a commit report can neither overlap an
+  // open frame, follow a discard, nor double up on one commit-close).
+  // Violations of ANY exactly-once or ordering rule — double yield, double
+  // resume, resume without yield, double end, start over an open frame,
+  // commit-report during an open frame — surface as log-position-tagged
+  // strings, so a regression names the exact event that broke the contract.
+  function checkFrameInvariants(log) {
+    const state = new Map(); // container -> 'open' | 'yielded' (absent = closed)
+    const pendingCommitClose = new Set(); // containers whose last close was end(commit), unconsumed
+    const violations = [];
+    for (let i = 0; i < log.length; i++) {
+      const e = log[i];
+      const s = state.get(e.container);
+      switch (e.type) {
+        case 'passStart':
+          if (s !== undefined) {
+            violations.push(`#${i} passStart over an ${s} frame`);
+          }
+          state.set(e.container, 'open');
+          pendingCommitClose.delete(e.container);
+          break;
+        case 'passYield':
+          if (s !== 'open') {
+            violations.push(`#${i} passYield in state ${s || 'closed'}`);
+          }
+          state.set(e.container, 'yielded');
+          break;
+        case 'passResume':
+          if (s !== 'yielded') {
+            violations.push(`#${i} passResume in state ${s || 'closed'}`);
+          }
+          state.set(e.container, 'open');
+          break;
+        case 'passEnd':
+          if (s === undefined) {
+            violations.push(`#${i} passEnd with no open frame`);
+          }
+          state.delete(e.container);
+          if (e.committed) {
+            pendingCommitClose.add(e.container);
+          }
+          break;
+        case 'rootCommitted':
+          if (s !== undefined) {
+            violations.push(`#${i} rootCommitted while frame ${s}`);
+          }
+          if (!pendingCommitClose.has(e.container)) {
+            violations.push(`#${i} rootCommitted without an end(commit)`);
+          }
+          pendingCommitClose.delete(e.container);
+          break;
+        default:
+          break;
+      }
+    }
+    return violations;
+  }
+
+  // Spec tests 7 and 8: the yield edge is observed when a time-sliced pass
+  // parks in a gap, the resume edge when the work loop re-enters it — at
+  // most once per gap, strictly alternating (a double yield or double
+  // resume is structurally unemittable), ordered start < yield < resume <
+  // end, with the frame closing only at the commit.
+  it('emits yield and resume edges around time-slicing gaps, strictly alternating', async () => {
+    const {events, unsubscribe} = subscribe();
+    let setValue;
+    function App() {
+      const [value, _setValue] = useState(0);
+      setValue = _setValue;
+      return (
+        <>
+          <Text text={`A${value}`} />
+          <Text text={`B${value}`} />
+          <Text text={`C${value}`} />
+        </>
+      );
+    }
+    const root = ReactNoop.createRoot();
+    await act(() => {
+      root.render(<App />);
+    });
+    assertLog(['A0', 'B0', 'C0']);
+    const container = events.passes[0].container;
+
+    await act(async () => {
+      startTransition(() => setValue(1));
+      await waitFor(['A1']);
+      const startIndex = events.log.indexOf(
+        events.passes[events.passes.length - 1],
+      );
+      // Exactly one yield since the pass started: the frame is parked in
+      // its first gap, open (no end), and nothing else fired on this root.
+      expect(frameEventsFor(events, container, startIndex + 1)).toEqual([
+        'yield',
+      ]);
+
+      await waitFor(['B1']);
+      // Re-entry resumed the pass exactly once before more work rendered,
+      // then parked it again — never two yields (or resumes) in a row.
+      expect(frameEventsFor(events, container, startIndex + 1)).toEqual([
+        'yield',
+        'resume',
+        'yield',
+      ]);
+
+      await waitForAll(['C1']);
+      // The final resume runs the tree to completion; the frame stays open
+      // through completion and closes at the commit, and only then does
+      // the committed view advance.
+      expect(frameEventsFor(events, container, startIndex + 1)).toEqual([
+        'yield',
+        'resume',
+        'yield',
+        'resume',
+        'end(commit)',
+        'rootCommitted',
+      ]);
+    });
+    expect(checkFrameInvariants(events.log)).toEqual([]);
+    unsubscribe();
+  });
+
+  // Spec test 9: a handler running in a yield gap observes NOT-in-render —
+  // truth is per callstack, not per frame — while component bodies inside
+  // the very same (still open) pass observe the render context.
+  it('a handler in a yield gap classifies as not-in-render while the frame is open', async () => {
+    const {events, unsubscribe} = subscribe();
+    const renderContexts = [];
+    let setValue;
+    function App() {
+      const [value, _setValue] = useState(0);
+      setValue = _setValue;
+      renderContexts.push(React.unstable_getRenderContext());
+      return (
+        <>
+          <Text text={`A${value}`} />
+          <Text text={`B${value}`} />
+        </>
+      );
+    }
+    const root = ReactNoop.createRoot();
+    await act(() => {
+      root.render(<App />);
+    });
+    assertLog(['A0', 'B0']);
+    const container = events.passes[0].container;
+
+    await act(async () => {
+      startTransition(() => setValue(1));
+      await waitFor(['A1']);
+
+      // The frame is open and parked in a gap: start seen, yield seen,
+      // no end.
+      const startIndex = events.log.indexOf(
+        events.passes[events.passes.length - 1],
+      );
+      expect(frameEventsFor(events, container, startIndex + 1)).toEqual([
+        'yield',
+      ]);
+
+      // Per-callstack truth in the gap: not in render, and a write issued
+      // right now would not be deferred.
+      expect(React.unstable_getRenderContext()).toBe(null);
+      expect(React.unstable_isCurrentWriteDeferred()).toBe(false);
+
+      await waitForAll(['B1']);
+    });
+
+    // Every component-body probe observed the render context with the
+    // right container — including the probe inside the yielded pass.
+    expect(renderContexts.length).toBeGreaterThanOrEqual(2);
+    renderContexts.forEach(ctx => {
+      expect(ctx).not.toBe(null);
+      expect(ctx.container).toBe(container);
+    });
+    expect(checkFrameInvariants(events.log)).toEqual([]);
+    unsubscribe();
+  });
+
+  // Spec test 10 — the regression scar that motivated per-callstack truth:
+  // a consumer modeling "in render on this root" as the wall-clock
+  // [passStart, passEnd) interval would attribute a yield-gap write to the
+  // open pass's deferred batch. The truth: the gap write mints the ambient
+  // urgent batch, distinct from the open pass's transition batch, and
+  // reaches the committed view through its own (earlier) commit.
+  it('wall-clock pass scope is wrong: a yield-gap write joins the ambient batch, not the open pass', async () => {
+    const {events, unsubscribe} = subscribe();
+    let setValue;
+    let setUrgent;
+    function App() {
+      const [value, _setValue] = useState(0);
+      const [urgent, _setUrgent] = useState(0);
+      setValue = _setValue;
+      setUrgent = _setUrgent;
+      return (
+        <>
+          <Text text={`U${urgent}`} />
+          <Text text={`A${value}`} />
+          <Text text={`B${value}`} />
+        </>
+      );
+    }
+    const root = ReactNoop.createRoot();
+    await act(() => {
+      root.render(<App />);
+    });
+    assertLog(['U0', 'A0', 'B0']);
+    const container = events.passes[0].container;
+
+    let t = null;
+    let gapToken = null;
+    await act(async () => {
+      startTransition(() => {
+        t = React.unstable_getCurrentWriteBatch();
+        setValue(1);
+      });
+      await waitFor(['U0', 'A1']);
+
+      // The wall-clock model says "in render": the frame IS open (start,
+      // yield, no end). But the write happening NOW classifies against the
+      // callstack:
+      const openFrame = events.passes[events.passes.length - 1];
+      expect(openFrame.included).toEqual([t]);
+      expect(
+        frameEventsFor(events, container, events.log.indexOf(openFrame) + 1),
+      ).toEqual(['yield']);
+
+      gapToken = React.unstable_getCurrentWriteBatch();
+      setUrgent(1); // same callstack: joins gapToken's ambient batch
+      expect(gapToken).not.toBe(t);
+      expect(gapToken & 1).toBe(0); // urgent, not deferred
+      expect(t & 1).toBe(1);
+
+      // Default priority does not preempt a transition: the open pass
+      // resumes and finishes WITHOUT the gap write (still U0), commits,
+      // and only then does the gap batch render and commit.
+      await waitForAll(['B1', 'U1', 'A1', 'B1']);
+    });
+
+    // The open pass committed exactly its own write set — the gap write,
+    // which wall-clock attribution would have folded into it (tearing the
+    // committed view), landed in its own distinct, later commit.
+    const gapCommit = events.commits.find(c => c.tokens.includes(gapToken));
+    const tCommit = events.commits.find(c => c.tokens.includes(t));
+    expect(gapCommit).not.toBe(undefined);
+    expect(tCommit).not.toBe(undefined);
+    expect(gapCommit).not.toBe(tCommit);
+    expect(tCommit.tokens).toEqual([t]); // no gap-write leak into the pass
+    expect(gapCommit.tokens).toEqual([gapToken]);
+    expect(events.log.indexOf(tCommit)).toBeLessThan(
+      events.log.indexOf(gapCommit),
+    );
+    expect(checkFrameInvariants(events.log)).toEqual([]);
+    unsubscribe();
+  });
 
   // Spec test 22: a same-root urgent commit discards an older yielded
   // same-root pass BEFORE any committed-view advance, and the discarded
@@ -152,9 +447,11 @@ describe('ReactFiberExternalRuntimePass', () => {
       expect(t & 1).toBe(1);
       expect(u & 1).toBe(0);
 
-      // Serialization: after the yielded pass started, the first
-      // committed-view advance on this root comes AFTER the pass-end edge
-      // that discarded the yielded pass — never while it was open.
+      // Serialization, with dispositions: after the yielded pass started,
+      // the first same-root pass-end is the DISCARD of that yielded pass,
+      // and the urgent commit's view advance arrives only after it —
+      // through the urgent pass's own frame closing with the commit
+      // disposition. Never an advance while a frame was open.
       const tail = events.log.slice(yieldedIndex + 1);
       const endOffset = tail.findIndex(
         e => e.type === 'passEnd' && e.container === container,
@@ -165,6 +462,15 @@ describe('ReactFiberExternalRuntimePass', () => {
       expect(endOffset).not.toBe(-1);
       expect(commitOffset).not.toBe(-1);
       expect(endOffset).toBeLessThan(commitOffset);
+      expect(tail[endOffset].committed).toBe(false); // the discard edge
+      expect(frameEventsFor(events, container, yieldedIndex + 1).slice(0, 5))
+        .toEqual([
+          'yield', // the open pass parked in its gap
+          'end(discard)', // …is discarded by the urgent restart, mid-gap…
+          'start',
+          'end(commit)', // …and only the urgent pass's own close commits…
+          'rootCommitted', // …immediately before the reported advance.
+        ]);
 
       // The urgent commit exposes only the urgent batch; the discarded
       // pass's transition batch stays out of the committed view.
@@ -192,6 +498,122 @@ describe('ReactFiberExternalRuntimePass', () => {
     expect(events.retired.filter(r => r.token === t)).toEqual([
       {type: 'retired', token: t, committed: true},
     ]);
+    expect(checkFrameInvariants(events.log)).toEqual([]);
+    unsubscribe();
+  });
+
+  // Spec test 21: a discarded pass can never later commit — even when its
+  // commit was already PENDING. A completed transition pass suspends its
+  // commit on resource A; a second transition discards it (canceling that
+  // pending commit) and suspends its own commit on resource B. Resolving
+  // the discarded pass's resource later must be inert; only the live
+  // frame's own resolution advances the committed view. Note the frame ≠
+  // batch distinction: the discarded FRAME never commits, while its BATCH,
+  // rebased into the restarted pass, commits with that fresh frame.
+  // @gate enableViewTransition
+  it('a discarded pass can never later commit', async () => {
+    const {events, unsubscribe} = subscribe();
+    let setSrc;
+    function App() {
+      const [src, _setSrc] = useState(null);
+      setSrc = _setSrc;
+      return (
+        <ViewTransition>
+          <Text text={src === null ? 'empty' : `showing ${src}`} />
+          {src !== null ? (
+            <suspensey-thing
+              src={src}
+              onLoadStart={() => Scheduler.log(`load ${src}`)}
+            />
+          ) : null}
+        </ViewTransition>
+      );
+    }
+    const root = ReactNoop.createRoot();
+    await act(() => {
+      root.render(<App />);
+    });
+    assertLog(['empty']);
+    const container = events.passes[0].container;
+    expect(events.commits.length).toBe(1);
+
+    // Pass 1 completes; its commit suspends on image A. Frame stays open.
+    let tA = null;
+    await act(() => {
+      startTransition(() => {
+        tA = React.unstable_getCurrentWriteBatch();
+        setSrc('A');
+      });
+    });
+    assertLog(['showing A', 'load A']);
+    expect(ReactNoop.getSuspenseyThingStatus('A')).toBe('pending');
+    expect(events.commits.length).toBe(1);
+    const passA = events.passes[events.passes.length - 1];
+    expect(passA.included).toEqual([tA]);
+    const passAIndex = events.log.indexOf(passA);
+
+    // Pass 2 (another transition) discards pass 1 — canceling its pending
+    // commit — and suspends its own commit on image B. Both transition
+    // lanes rebase into the fresh pass, so it includes both batches.
+    let tB = null;
+    await act(() => {
+      startTransition(() => {
+        tB = React.unstable_getCurrentWriteBatch();
+        setSrc('B');
+      });
+    });
+    assertLog(['showing B', 'load B']);
+    expect(ReactNoop.getSuspenseyThingStatus('B')).toBe('pending');
+    expect(events.commits.length).toBe(1);
+    const passB = events.passes[events.passes.length - 1];
+    expect(passB).not.toBe(passA);
+    expect(new Set(passB.included)).toEqual(new Set([tA, tB]));
+    // Pass 1's frame closed with the discard disposition before pass 2
+    // started.
+    const discardAIndex = events.log.findIndex(
+      (e, i) =>
+        i > passAIndex && e.type === 'passEnd' && e.container === container,
+    );
+    expect(discardAIndex).not.toBe(-1);
+    expect(events.log[discardAIndex].committed).toBe(false);
+    expect(discardAIndex).toBeLessThan(events.log.indexOf(passB));
+
+    // THE PIN: the discarded pass's resource resolves — its canceled
+    // commit must be inert. No committed-view advance, no channel events,
+    // no output change.
+    const logLengthBefore = events.log.length;
+    await act(() => {
+      ReactNoop.resolveSuspenseyThing('A');
+    });
+    assertLog([]);
+    expect(events.log.length).toBe(logLengthBefore);
+    expect(events.commits.length).toBe(1);
+    expect(root).toMatchRenderedOutput('empty');
+
+    // The live frame's own resource commits it: exactly one new commit,
+    // carrying both rebased batches, closing pass 2's frame with the
+    // commit disposition.
+    await act(() => {
+      ReactNoop.resolveSuspenseyThing('B');
+    });
+    assertLog([]);
+    expect(root).toMatchRenderedOutput(
+      <>
+        showing B
+        <suspensey-thing src="B" />
+      </>,
+    );
+    expect(events.commits.length).toBe(2);
+    expect(new Set(events.commits[1].tokens)).toEqual(new Set([tA, tB]));
+    expect(
+      frameEventsFor(events, container, events.log.indexOf(passB) + 1),
+    ).toEqual(['end(commit)', 'rootCommitted']);
+    expect(
+      events.retired
+        .filter(r => r.token === tA || r.token === tB)
+        .map(r => r.committed),
+    ).toEqual([true, true]);
+    expect(checkFrameInvariants(events.log)).toEqual([]);
     unsubscribe();
   });
 
@@ -244,8 +666,11 @@ describe('ReactFiberExternalRuntimePass', () => {
     expect(ReactNoop.getSuspenseyThingStatus('A')).toBe('pending');
 
     // Completed but not committed, observed through the channel: the pass
-    // that included the batch ended (the tree is done), yet no commit
-    // report followed and the token is still live.
+    // frame that included the batch is STILL OPEN — under the
+    // end-disposition semantics a frame outlives render completion and
+    // waits for its commit or discard edge — so no pass-end fired, no
+    // commit report followed, the token is live, the committed view
+    // unchanged.
     const completedPass = events.passes[events.passes.length - 1];
     expect(completedPass.included).toEqual([t]);
     const completedIndex = events.log.indexOf(completedPass);
@@ -254,7 +679,7 @@ describe('ReactFiberExternalRuntimePass', () => {
       afterCompleted.some(
         e => e.type === 'passEnd' && e.container === container,
       ),
-    ).toBe(true);
+    ).toBe(false);
     expect(events.commits.length).toBe(1); // the mount only
     expect(events.retired.map(r => r.token)).not.toContain(t);
     expect(root).toMatchRenderedOutput('step 0');
@@ -278,6 +703,19 @@ describe('ReactFiberExternalRuntimePass', () => {
     const urgentCommit = events.commits[1];
     expect(urgentCommit.tokens).toEqual([u]);
     expect(events.retired.map(r => r.token)).not.toContain(t);
+
+    // The insertion is what finally closed the completed-but-uncommitted
+    // frame — with the DISCARD disposition (its pending commit was
+    // canceled), before the urgent commit's view advance.
+    const discardIndex = events.log.findIndex(
+      (e, i) =>
+        i > completedIndex &&
+        e.type === 'passEnd' &&
+        e.container === container,
+    );
+    expect(discardIndex).not.toBe(-1);
+    expect(events.log[discardIndex].committed).toBe(false);
+    expect(discardIndex).toBeLessThan(events.log.indexOf(urgentCommit));
 
     // The pre-commit restart, in order: completed pass with t, then the
     // urgent commit, then a FRESH pass including t.
@@ -305,6 +743,19 @@ describe('ReactFiberExternalRuntimePass', () => {
     expect(events.retired.filter(r => r.token === t)).toEqual([
       {type: 'retired', token: t, committed: true},
     ]);
+
+    // The frame that closed here is the restarted pass's — closed exactly
+    // once, with the commit disposition, at RESOLUTION time: its close was
+    // deferred from render completion (the previous act) to the moment the
+    // suspended commit could actually land.
+    const closesAfterRestart = events.log.filter(
+      (e, i) =>
+        i > restartIndex && e.type === 'passEnd' && e.container === container,
+    );
+    expect(closesAfterRestart).toEqual([
+      {type: 'passEnd', container, committed: true},
+    ]);
+    expect(checkFrameInvariants(events.log)).toEqual([]);
     unsubscribe();
   });
 
@@ -313,6 +764,12 @@ describe('ReactFiberExternalRuntimePass', () => {
   // interleaving that includes a yielded pass, a cross-root commit inside
   // the yield gap (allowed: the invariant is per root, not global), a
   // same-root urgent interrupt, and the restarted transition's commit.
+  // Under the end-disposition semantics the frame close is itself part of
+  // the commit sequence (end(commit) fires inside commitRoot, before the
+  // advance is reported), so this invariant holds by construction — this
+  // test keeps proving it against real scheduler interleavings, where the
+  // frames being closed are discarded/restarted ones, not just the
+  // committing pass's own.
   it('never advances a committed view while the same root has an open pass frame', async () => {
     const openByContainer = new Map();
     let totalCommits = 0;

@@ -304,7 +304,13 @@ describe('ReactFiberBatchRegistry', () => {
   });
 
   describe('protocol handshake', () => {
-    const CAPABILITIES_V1 = (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3);
+    // Every capability bit this build implements AND pins with tests: batch
+    // tokens, pass lifecycle, retirement, mutation window (S1); pass
+    // yield/resume edges + end disposition (S3). Growing this constant is
+    // deliberate: a bit may only be added together with the runtime
+    // capability it names and the tests that pin it.
+    const IMPLEMENTED_CAPABILITIES =
+      (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4);
 
     function getSharedInternals(ReactModule) {
       return ReactModule.__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE;
@@ -313,11 +319,11 @@ describe('ReactFiberBatchRegistry', () => {
     it('exposes version and capability bits on both sides of the channel', () => {
       const protocol = React.unstable_externalRuntimeProtocol;
       expect(protocol.version).toBe(1);
-      expect(protocol.capabilities).toBe(CAPABILITIES_V1);
+      expect(protocol.capabilities).toBe(IMPLEMENTED_CAPABILITIES);
       // The renderer (required in beforeEach) registered a provider echoing
       // the version and capabilities its reconciler was built with.
       expect(protocol.providerProtocols).toEqual([
-        {version: 1, capabilities: CAPABILITIES_V1},
+        {version: 1, capabilities: IMPLEMENTED_CAPABILITIES},
       ]);
     });
 
