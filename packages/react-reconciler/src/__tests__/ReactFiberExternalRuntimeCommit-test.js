@@ -701,4 +701,150 @@ describe('ReactFiberExternalRuntimeCommit', () => {
     ]);
     unsubscribe();
   });
+
+  // Spec test 26 — the §4.2 intra-commit ordering, normative for the
+  // binding's mount-fixup baseline (spec §5.10): within one commit, the
+  // committed-side ENTRY (the pass frame's end(commit) close) precedes the
+  // root's committed-batch table update (onRootCommitted), which precedes
+  // every retirement fold the commit causes (onBatchRetired), which precede
+  // the host-mutation window, which precedes layout effects. A consumer
+  // snapshotting its own mirror at end(commit) therefore captures the
+  // PRE-commit {retired set, root commit generation} — the commit's own
+  // folds and table update cannot mask foreign motion.
+  it('orders each commit: entry, then table update, then folds, then mutation, then layout', async () => {
+    const log = [];
+    const baseline = {captured: false, generation: null, retiredCount: null};
+    const mirror = {generation: 0, retiredCount: 0};
+    let containerOfInterest = null;
+    const unsubscribe = React.unstable_subscribeToExternalRuntime({
+      onRenderPassStart(container, includedBatches, lineageId) {
+        log.push({
+          type: 'passStart',
+          container,
+          included: includedBatches.slice(),
+        });
+      },
+      onRenderPassEnd(container, committed) {
+        log.push({type: 'passEnd', container, committed});
+        if (committed && container === containerOfInterest) {
+          // The baseline capture, exactly as the binding performs it: at
+          // the commit's committed-side entry, before anything moves.
+          baseline.captured = true;
+          baseline.generation = mirror.generation;
+          baseline.retiredCount = mirror.retiredCount;
+        }
+      },
+      onRootCommitted(container, committedBatches, rootCommitGeneration) {
+        log.push({
+          type: 'rootCommitted',
+          container,
+          tokens: committedBatches.slice(),
+          generation: rootCommitGeneration,
+        });
+        mirror.generation = rootCommitGeneration;
+      },
+      onBatchRetired(token, committed) {
+        log.push({type: 'retired', token, committed});
+        mirror.retiredCount++;
+      },
+      onBeforeMutation(container) {
+        log.push({type: 'beforeMutation', container});
+      },
+      onAfterMutation(container) {
+        log.push({type: 'afterMutation', container});
+      },
+    });
+
+    // Two entangled sibling transitions retiring at ONE commit make the
+    // fold ordering plural: both retirements must still follow the single
+    // table update.
+    let resolveGate;
+    const gate = new Promise(resolve => {
+      resolveGate = resolve;
+    });
+    let setValue;
+    function App() {
+      const [value, _setValue] = useState(0);
+      setValue = _setValue;
+      if (value === 1) {
+        React.use(gate);
+      }
+      React.useLayoutEffect(() => {
+        log.push({type: 'layout', value});
+      }, [value]);
+      return <Text text={`v=${value}`} />;
+    }
+    const root = ReactNoop.createRoot();
+    await act(() => {
+      root.render(<App />);
+    });
+    assertLog(['v=0']);
+    containerOfInterest = log.find(e => e.type === 'passStart').container;
+    const container = containerOfInterest;
+
+    let t1 = null;
+    await act(() => {
+      startTransition(() => {
+        t1 = React.unstable_getCurrentWriteBatch();
+        setValue(1);
+      });
+    });
+    assertLog([]); // suspended on the gate
+    let t2 = null;
+    const commitStart = log.length;
+    await act(() => {
+      startTransition(() => {
+        t2 = React.unstable_getCurrentWriteBatch();
+        setValue(2);
+      });
+    });
+    assertLog(['v=2']);
+
+    // The commit, as one ordered sequence. (The tail also contains the
+    // suspended first pass's end(discard) and the joint pass's start,
+    // before the commit; the commit's entry is the COMMIT-disposition
+    // close.)
+    const tail = log.slice(commitStart);
+    const kinds = tail.map(e => e.type);
+    const entryIndex = tail.findIndex(
+      e => e.type === 'passEnd' && e.committed === true,
+    );
+    const tableIndex = kinds.indexOf('rootCommitted');
+    const firstFold = kinds.indexOf('retired');
+    const lastFold = kinds.lastIndexOf('retired');
+    const beforeIndex = kinds.indexOf('beforeMutation');
+    const afterIndex = kinds.indexOf('afterMutation');
+    const layoutIndex = kinds.findIndex(
+      (k, i) => k === 'layout' && tail[i].value === 2,
+    );
+    expect(entryIndex).not.toBe(-1);
+    expect(tail[entryIndex].committed).toBe(true);
+    expect(tableIndex).not.toBe(-1);
+    expect(new Set(tail[tableIndex].tokens)).toEqual(new Set([t1, t2]));
+    expect(firstFold).not.toBe(-1);
+    expect(lastFold).not.toBe(firstFold); // two folds due at this commit
+    expect(beforeIndex).not.toBe(-1);
+    expect(afterIndex).not.toBe(-1);
+    expect(layoutIndex).not.toBe(-1);
+    // 1. entry  2. table update  3. folds  — then mutation, then layout.
+    expect(entryIndex).toBeLessThan(tableIndex);
+    expect(tableIndex).toBeLessThan(firstFold);
+    expect(lastFold).toBeLessThan(beforeIndex);
+    expect(beforeIndex).toBeLessThan(afterIndex);
+    expect(afterIndex).toBeLessThan(layoutIndex);
+    expect(tail[beforeIndex].container).toBe(container);
+
+    // The baseline captured at the entry excludes ALL of this commit's own
+    // motion: the generation it saw predates the table update the same
+    // commit delivered, and none of the commit's folds had happened yet.
+    expect(baseline.captured).toBe(true);
+    expect(baseline.generation).toBe(tail[tableIndex].generation - 1);
+    expect(baseline.retiredCount).toBe(0);
+    expect(mirror.retiredCount).toBe(2);
+
+    resolveGate();
+    await act(() => gate);
+    assertLog([]);
+    unsubscribe();
+  });
 });

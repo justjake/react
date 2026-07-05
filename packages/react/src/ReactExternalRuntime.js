@@ -85,6 +85,14 @@ import reportGlobalError from 'shared/reportGlobalError';
 //           commit/discard edge — onRenderPassEnd carries the
 //           disposition and fires at the commit (before that commit's
 //           onRootCommitted) or at the discard, NOT at render completion
+//   1 << 5  per-root commit reporting + baseline-capture ordering:
+//           onRootCommitted fires on every commit with the root's delta
+//           and generation, and each commit is ordered — the committed-
+//           side entry (end(commit)) precedes the table update
+//           (onRootCommitted) precedes the folds it causes
+//           (onBatchRetired) precedes the host-mutation window precedes
+//           layout effects (spec §4.2, fork test 26): a consumer
+//           snapshotting at end(commit) captures the pre-commit state
 //   1 << 6  runInBatch — unstable_runInBatch(token, fn) runs fn so the
 //           React updates it schedules join the token's batch: its own
 //           lane for a live batch (pinned transition for deferred tokens,
@@ -99,13 +107,9 @@ import reportGlobalError from 'shared/reportGlobalError';
 //           every work-in-progress pass on every root: each open frame
 //           closes with the discard disposition before the call returns,
 //           and React re-schedules the abandoned lanes as fresh passes
-// Reserved for capabilities this fork plans to add; a stale build lacking
-// one fails the consumer handshake instead of silently missing events:
-//   1 << 5  per-root commit reporting + baseline-capture ordering
-//           (the onRootCommitted event itself already ships, as the
-//           existence-proof minimal form; the bit flips only when the
-//           full fact — including the spec §4.2 intra-commit ordering
-//           guarantee, fork test 26 — is implemented and pinned)
+// Every planned v1 bit is implemented; new capabilities append new bits (a
+// stale build lacking one fails the consumer handshake instead of silently
+// missing events).
 export const EXTERNAL_RUNTIME_PROTOCOL_VERSION = 1;
 export const EXTERNAL_RUNTIME_CAPABILITIES =
   (1 << 0) |
@@ -113,6 +117,7 @@ export const EXTERNAL_RUNTIME_CAPABILITIES =
   (1 << 2) |
   (1 << 3) |
   (1 << 4) |
+  (1 << 5) |
   (1 << 6) |
   (1 << 7) |
   (1 << 8);

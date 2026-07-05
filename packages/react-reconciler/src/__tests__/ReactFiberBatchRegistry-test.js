@@ -209,6 +209,169 @@ describe('ReactFiberBatchRegistry', () => {
     unsubscribe();
   });
 
+  // Spec test 1: writes inside a discrete event handler classify urgent —
+  // a batch of their own, distinct from the same event's ambient default
+  // batch, committing and retiring like any other.
+  it('classifies discrete-event writes urgent, distinct from the ambient default batch', async () => {
+    const {events, unsubscribe} = subscribe();
+    let setValue;
+    function App() {
+      const [value, _setValue] = useState(0);
+      setValue = _setValue;
+      return <Text text={`v=${value}`} />;
+    }
+    const root = ReactNoop.createRoot();
+    await act(() => {
+      root.render(<App />);
+    });
+    assertLog(['v=0']);
+
+    let discreteToken = null;
+    let defaultToken = null;
+    await act(() => {
+      ReactNoop.discreteUpdates(() => {
+        discreteToken = React.unstable_getCurrentWriteBatch();
+        expect(React.unstable_isCurrentWriteDeferred()).toBe(false);
+        setValue(1);
+      });
+      // The same event, outside the discrete handler: the ambient default
+      // batch — a different lane, a different token.
+      defaultToken = React.unstable_getCurrentWriteBatch();
+    });
+    assertLog(['v=1']);
+    expect(discreteToken & 1).toBe(0);
+    expect(defaultToken & 1).toBe(0);
+    expect(defaultToken).not.toBe(discreteToken);
+    expect(events.retired.filter(r => r.token === discreteToken)).toEqual([
+      {token: discreteToken, committed: true},
+    ]);
+    unsubscribe();
+  });
+
+  // Spec test 3: a write with no scope at all — a timer or network callback
+  // — classifies as the ambient default batch: urgent (not deferred), its
+  // own token, retiring uncommitted when it schedules nothing.
+  it('classifies timer/network (ambient) writes as the default batch', async () => {
+    const {events, unsubscribe} = subscribe();
+    let ambientToken = null;
+    let deferred = null;
+    await act(() => {
+      // act's callback runs like a timer callback: no event, no transition.
+      ambientToken = React.unstable_getCurrentWriteBatch();
+      deferred = React.unstable_isCurrentWriteDeferred();
+    });
+    expect(deferred).toBe(false);
+    expect(ambientToken & 1).toBe(0);
+    // Store-only ambient batch: retires uncommitted at its close edge.
+    expect(events.retired).toEqual([{token: ambientToken, committed: false}]);
+    unsubscribe();
+  });
+
+  // Spec test 4: writes inside flushSync classify urgent into the sync
+  // batch, which commits synchronously and retires committed.
+  it('classifies flushSync writes urgent; the batch commits synchronously', async () => {
+    const {events, unsubscribe} = subscribe();
+    let setValue;
+    function App() {
+      const [value, _setValue] = useState(0);
+      setValue = _setValue;
+      return <Text text={`v=${value}`} />;
+    }
+    const root = ReactNoop.createRoot();
+    await act(() => {
+      root.render(<App />);
+    });
+    assertLog(['v=0']);
+
+    let token = null;
+    ReactNoop.flushSync(() => {
+      token = React.unstable_getCurrentWriteBatch();
+      expect(React.unstable_isCurrentWriteDeferred()).toBe(false);
+      setValue(1);
+    });
+    // Committed synchronously: the log is already there, no act needed.
+    assertLog(['v=1']);
+    expect(token & 1).toBe(0);
+    expect(events.retired.filter(r => r.token === token)).toEqual([
+      {token, committed: true},
+    ]);
+    unsubscribe();
+  });
+
+  // Spec test 5: nested scopes classify per-callstack. A transition inside
+  // a discrete handler is deferred while the handler around it stays
+  // urgent; a discrete scope inside a transition is urgent while the
+  // transition around it stays deferred.
+  it('classifies nested scopes per callstack: transition-in-event and event-in-transition', async () => {
+    const {unsubscribe} = subscribe();
+    const probes = {};
+    await act(() => {
+      ReactNoop.discreteUpdates(() => {
+        probes.handlerBefore = React.unstable_getCurrentWriteBatch();
+        startTransition(() => {
+          probes.transitionInHandler = React.unstable_getCurrentWriteBatch();
+          probes.transitionInHandlerDeferred =
+            React.unstable_isCurrentWriteDeferred();
+        });
+        probes.handlerAfter = React.unstable_getCurrentWriteBatch();
+      });
+    });
+    expect(probes.transitionInHandlerDeferred).toBe(true);
+    expect(probes.transitionInHandler & 1).toBe(1);
+    expect(probes.handlerBefore & 1).toBe(0);
+    // The handler's own classification is untouched by the nested scope.
+    expect(probes.handlerAfter).toBe(probes.handlerBefore);
+    expect(probes.transitionInHandler).not.toBe(probes.handlerBefore);
+
+    await act(() => {
+      startTransition(() => {
+        probes.scopeBefore = React.unstable_getCurrentWriteBatch();
+        ReactNoop.discreteUpdates(() => {
+          probes.eventInScope = React.unstable_getCurrentWriteBatch();
+          probes.eventInScopeDeferred = React.unstable_isCurrentWriteDeferred();
+        });
+        probes.scopeAfter = React.unstable_getCurrentWriteBatch();
+      });
+    });
+    expect(probes.eventInScopeDeferred).toBe(false);
+    expect(probes.eventInScope & 1).toBe(0);
+    expect(probes.scopeBefore & 1).toBe(1);
+    expect(probes.scopeAfter).toBe(probes.scopeBefore);
+    expect(probes.eventInScope).not.toBe(probes.scopeBefore);
+    unsubscribe();
+  });
+
+  // Spec test 6: the fork side of the library's engine-batch contract —
+  // classification is PER WRITE, at write time. Writes interleaved across
+  // scopes within one event each get their scope's token, stably: an
+  // engine batch() that defers delivery can replay each write against the
+  // context it was captured with.
+  it('preserves per-write context across interleaved scopes in one event', async () => {
+    const {unsubscribe} = subscribe();
+    let u1 = null;
+    let u2 = null;
+    let t1 = null;
+    let t2 = null;
+    await act(() => {
+      u1 = React.unstable_getCurrentWriteBatch();
+      startTransition(() => {
+        t1 = React.unstable_getCurrentWriteBatch();
+      });
+      u2 = React.unstable_getCurrentWriteBatch();
+      // A second transition scope in the same event joins the same
+      // transition batch (same-event transitions share their lane).
+      startTransition(() => {
+        t2 = React.unstable_getCurrentWriteBatch();
+      });
+    });
+    expect(u2).toBe(u1);
+    expect(t2).toBe(t1);
+    expect(t1).not.toBe(u1);
+    expect(u1 & 1).toBe(0);
+    expect(t1 & 1).toBe(1);
+    unsubscribe();
+  });
+
   it('parks a store-only async action until the action settles', async () => {
     const {events, unsubscribe} = subscribe();
     let resolveGate;
@@ -229,6 +392,57 @@ describe('ReactFiberBatchRegistry', () => {
     await act(() => gate);
     expect(events.retired.filter(r => r.token === token)).toEqual([
       {token, committed: false},
+    ]);
+    unsubscribe();
+  });
+
+  // Appendix B flag 3, pinned: while an async action is pending, a
+  // re-wrapped continuation (a startTransition after the await) claims the
+  // action's lane — requestTransitionLane consults the entangled action
+  // lane — so it lands in the same slot and gets the SAME token: the parked
+  // action token IS the re-wrap token (the registry's documented explicit-
+  // merge rule). A bare (un-wrapped) continuation reports no transition and
+  // classifies as the ambient default batch instead.
+  it('a re-wrapped async-action continuation joins the parked token; a bare one is ambient', async () => {
+    const {events, unsubscribe} = subscribe();
+    let resolveGate;
+    const gate = new Promise(resolve => {
+      resolveGate = resolve;
+    });
+    let tokenBefore = null;
+    let bareToken = null;
+    let bareDeferred = null;
+    let rewrapToken = null;
+    startTransition(async () => {
+      tokenBefore = React.unstable_getCurrentWriteBatch();
+      await gate;
+      // The bare continuation: no transition scope survives an await.
+      bareDeferred = React.unstable_isCurrentWriteDeferred();
+      bareToken = React.unstable_getCurrentWriteBatch();
+      // The re-wrapped continuation: a fresh startTransition while the
+      // action scope is still pending.
+      startTransition(() => {
+        rewrapToken = React.unstable_getCurrentWriteBatch();
+      });
+    });
+    // The close edge parks the store-only action token instead of retiring.
+    await act(() => {});
+    expect(tokenBefore & 1).toBe(1);
+    expect(events.retired.map(r => r.token)).not.toContain(tokenBefore);
+
+    resolveGate();
+    await act(() => gate);
+    // THE PIN: same lane ⇒ same slot ⇒ same token.
+    expect(rewrapToken).toBe(tokenBefore);
+    // The bare continuation was ambient: urgent classification, a distinct
+    // default-lane token.
+    expect(bareDeferred).toBe(false);
+    expect(bareToken & 1).toBe(0);
+    expect(bareToken).not.toBe(tokenBefore);
+    // Still store-only when the action settled: retired exactly once,
+    // uncommitted — the re-wrap did not double-retire or resurrect it.
+    expect(events.retired.filter(r => r.token === tokenBefore)).toEqual([
+      {token: tokenBefore, committed: false},
     ]);
     unsubscribe();
   });
@@ -308,15 +522,18 @@ describe('ReactFiberBatchRegistry', () => {
     // tokens, pass lifecycle, retirement, mutation window (S1); pass
     // yield/resume edges + end disposition, discardAllWip (S3); runInBatch
     // (S4, pinned by ReactFiberRunInBatch-test.js); render lineage ids
-    // (S4, pinned in the Pass file). Growing this constant is deliberate:
-    // a bit may only be added together with the runtime capability it
-    // names and the tests that pin it.
+    // (S4, pinned in the Pass file); per-root commit reporting with the
+    // §4.2 intra-commit ordering (S2 event + S4 ordering pin, Commit
+    // file). All v1 bits are implemented; growing this constant is
+    // deliberate: a bit may only be added together with the runtime
+    // capability it names and the tests that pin it.
     const IMPLEMENTED_CAPABILITIES =
       (1 << 0) |
       (1 << 1) |
       (1 << 2) |
       (1 << 3) |
       (1 << 4) |
+      (1 << 5) |
       (1 << 6) |
       (1 << 7) |
       (1 << 8);
