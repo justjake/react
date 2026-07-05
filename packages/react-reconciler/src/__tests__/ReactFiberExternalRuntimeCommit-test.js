@@ -551,4 +551,86 @@ describe('ReactFiberExternalRuntimeCommit', () => {
     expect(commitsChecked).toBe(7);
     unsubscribe();
   });
+
+  // Write-set closure under ENTANGLED sibling transitions. Two transitions
+  // claim separate lanes and separate tokens, but the second writes through
+  // a hook queue that already holds the first's pending update, so React
+  // entangles the lanes: whichever lane names the render, the pass consumes
+  // BOTH batches' updates (entangledRenderLanes). The channel must report
+  // the write set the tree actually shows — both tokens included in the
+  // pass, both in the commit's delta, both retired committed=true — or a
+  // consumer resolving reads against included-batches misses a write the
+  // committed view visibly contains. (Under enableParallelTransitions —
+  // on in www test runs — sibling transitions render on single lanes as a
+  // matter of course, making this the common shape, not an edge case.)
+  it('reports entangled sibling-transition batches together: included, committed, retired', async () => {
+    const {events, unsubscribe} = subscribe();
+    let resolveGate;
+    const gate = new Promise(resolve => {
+      resolveGate = resolve;
+    });
+    let setValue;
+    function App() {
+      const [value, _setValue] = useState(0);
+      setValue = _setValue;
+      if (value === 1) {
+        React.use(gate); // t1 alone suspends; the rebased fold to 2 does not
+      }
+      return <Text text={`v=${value}`} />;
+    }
+    const root = ReactNoop.createRoot();
+    await act(() => {
+      root.render(<App />);
+    });
+    assertLog(['v=0']);
+    const container = lastContainer(events);
+
+    // Transition 1 suspends and stays pending on its own lane.
+    let t1 = null;
+    await act(() => {
+      startTransition(() => {
+        t1 = React.unstable_getCurrentWriteBatch();
+        setValue(1);
+      });
+    });
+    assertLog([]); // suspended before logging anything
+    expect(commitsOn(events, container).length).toBe(1); // mount only
+
+    // Transition 2, a separate event: its own lane, its own token — and an
+    // entanglement with t1 through the shared useState queue.
+    let t2 = null;
+    await act(() => {
+      startTransition(() => {
+        t2 = React.unstable_getCurrentWriteBatch();
+        setValue(2);
+      });
+    });
+    assertLog(['v=2']);
+    expect(t2).not.toBe(t1);
+
+    // The committing pass reported BOTH batches, whatever lane named it.
+    const commitPass = events.passes[events.passes.length - 1];
+    expect(new Set(commitPass.included)).toEqual(new Set([t1, t2]));
+
+    // One commit, delta = both batches: the committed view shows the folded
+    // write set (v=2 consumed t1's update), so both must be reported and
+    // neither may be mistaken for a prune.
+    const containerCommits = commitsOn(events, container);
+    const finalCommit = containerCommits[containerCommits.length - 1];
+    expect(containerCommits.length).toBe(2);
+    expect(new Set(finalCommit.tokens)).toEqual(new Set([t1, t2]));
+    expect(
+      events.retired
+        .filter(r => r.token === t1 || r.token === t2)
+        .map(r => r.committed),
+    ).toEqual([true, true]);
+
+    // The gate that t1's lone render suspended on is irrelevant after the
+    // fold: resolving it must be a no-op.
+    resolveGate();
+    await act(() => gate);
+    assertLog([]);
+    expect(commitsOn(events, container).length).toBe(2);
+    unsubscribe();
+  });
 });

@@ -12,6 +12,7 @@ import type {Lane, Lanes} from './ReactFiberLane';
 import type {Thenable} from 'shared/ReactTypes';
 
 import {getExternalRuntime} from './ReactFiberExternalRuntime';
+import {getEntangledLanes} from './ReactFiberLane';
 import {
   peekEntangledActionLane,
   peekEntangledActionThenable,
@@ -157,12 +158,14 @@ export function batchRegistryBackfillRoot(root: FiberRoot): void {
 }
 
 /**
- * Finish edge. Called after markRootFinished with both the lanes in this
- * commit and the lanes still pending on the root. A batch is done on a root
- * when its lane is no longer pending there. Its lane is in finishedLanes only
- * when this commit rendered it; otherwise its updates died with deleted
- * fibers and were pruned from the surviving tree. A token retires exactly
- * once, when its last pending root is done with it.
+ * Finish edge. Called after markRootFinished with the lanes this commit's
+ * pass rendered — the committed lanes expanded by their entanglements, the
+ * same expansion the render consumed updates from — and the lanes still
+ * pending on the root. A batch is done on a root when its lane is no longer
+ * pending there. Its lane is in finishedLanes only when this commit rendered
+ * its updates (directly or entangled); otherwise its updates died with
+ * deleted fibers and were pruned from the surviving tree. A token retires
+ * exactly once, when its last pending root is done with it.
  *
  * This edge is also the per-root commit report (spec §4.1 fact 3):
  * onRootCommitted fires on every commit with the root's new commit
@@ -330,17 +333,27 @@ function retireSlot(slot: Slot, committed: boolean): void {
 
 /**
  * The batches a render pass on `root` includes: the live tokens for its
- * render lanes, plus every still-pending batch this root has ALREADY
- * committed — the root's committed tree shows those writes, so hiding them
- * from its later renders (urgent ones especially) would tear against its own
- * DOM while other roots finish the batch.
+ * ENTANGLED render lanes, plus every still-pending batch this root has
+ * ALREADY committed — the root's committed tree shows those writes, so
+ * hiding them from its later renders (urgent ones especially) would tear
+ * against its own DOM while other roots finish the batch.
+ *
+ * Entangled expansion: the pass consumes updates from
+ * getEntangledLanes(root, lanes) — the same expansion prepareFreshStack
+ * assigns to entangledRenderLanes — not just from the lanes that named the
+ * render. E.g. under enableParallelTransitions (www) a sibling transition
+ * renders on its own lane, but a second transition writing through a shared
+ * hook queue entangles with the first: the pass renders BOTH batches'
+ * updates and must report both tokens, or a consumer resolving reads
+ * against included-batches misses a write the tree visibly shows.
  */
 export function batchTokensForRender(
   root: FiberRoot,
   lanes: Lanes,
 ): Array<BatchToken> {
   const tokens: Array<BatchToken> = [];
-  let remaining = lanes;
+  const entangledRenderLanes = getEntangledLanes(root, lanes);
+  let remaining = entangledRenderLanes;
   while (remaining !== 0) {
     const index = 31 - Math.clz32(remaining);
     remaining &= ~(1 << index);
@@ -359,7 +372,7 @@ export function batchTokensForRender(
       token !== null &&
       slot.committedRoots !== null &&
       slot.committedRoots.has(root) &&
-      ((lanes >> i) & 1) === 0 // not already collected via render lanes
+      ((entangledRenderLanes >> i) & 1) === 0 // not already collected above
     ) {
       tokens.push(token);
     }

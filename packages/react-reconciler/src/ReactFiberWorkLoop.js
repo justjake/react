@@ -3834,6 +3834,18 @@ function commitRoot(
     remainingLanes &= ~GestureLane;
   }
 
+  // External-runtime batch registry: the write set this commit makes
+  // visible spans the finished lanes plus the lanes entangled with them —
+  // an entangled lane's updates were consumed by the committing pass's
+  // render (entangledRenderLanes) even when the lane itself did not name
+  // the render (e.g. a sibling transition under enableParallelTransitions).
+  // Capture the expansion BEFORE markRootFinished clears the entanglement
+  // bookkeeping. No same-root commit can have intervened since this pass
+  // rendered (it would have discarded the pass), so this is the render-time
+  // expansion, at most grown by lanes whose updates stayed pending — and
+  // those are filtered out by the remainingLanes check in the registry.
+  const entangledFinishedLanes = getEntangledLanes(root, lanes);
+
   markRootFinished(
     root,
     lanes,
@@ -3846,7 +3858,7 @@ function commitRoot(
   // External-runtime batch registry (finish edge): lanes leaving
   // root.pendingLanes retire their batch tokens, exactly once, at the same
   // moment React's own books change.
-  batchRegistryOnRootFinished(root, lanes, root.pendingLanes);
+  batchRegistryOnRootFinished(root, entangledFinishedLanes, root.pendingLanes);
 
   // Reset this before firing side effects so we can detect recursive updates.
   didIncludeCommitPhaseUpdate = false;
