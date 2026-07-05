@@ -51,6 +51,7 @@ export {
   unstable_isCurrentWriteDeferred,
   unstable_getRenderContext,
   unstable_discardAllWip,
+  unstable_runInBatch,
   use,
   useActionState,
   useCallback,

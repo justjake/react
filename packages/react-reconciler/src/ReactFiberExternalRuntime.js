@@ -15,7 +15,10 @@ import type {
 } from 'react/src/ReactExternalRuntime';
 
 import ReactSharedInternals from 'shared/ReactSharedInternals';
-import {batchTokensForRender} from './ReactFiberBatchRegistry';
+import {
+  batchTokensForRender,
+  batchRegistryOnRenderStart,
+} from './ReactFiberBatchRegistry';
 
 /**
  * Reconciler side of the external-runtime introspection channel (see
@@ -38,7 +41,7 @@ import {batchTokensForRender} from './ReactFiberBatchRegistry';
 // between separately built react and renderer packages.
 const EXTERNAL_RUNTIME_PROTOCOL_VERSION = 1;
 const EXTERNAL_RUNTIME_CAPABILITIES =
-  (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 8);
+  (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 6) | (1 << 8);
 
 export function getExternalRuntime(): ExternalRuntime | null {
   // The runtime exists once the isomorphic `react` module has evaluated.
@@ -85,6 +88,7 @@ export function registerExternalRuntimeProvider(
     isCurrentWriteDeferred: methods.isCurrentWriteDeferred,
     getCurrentWriteBatch: methods.getCurrentWriteBatch,
     discardAllWip: methods.discardAllWip,
+    runInBatch: methods.runInBatch,
   });
 }
 
@@ -145,6 +149,10 @@ export function notifyRenderPassStart(root: FiberRoot, lanes: Lanes): void {
     }
   }
   if (lanes !== 0) {
+    // Registry bookkeeping (unconditional, like the frame sets): record the
+    // render-time entangled expansion this pass consumes, for the finish
+    // edge's visibility decisions.
+    batchRegistryOnRenderStart(root, lanes);
     rootsWithActivePass.add(root);
     if (runtime.hasListeners) {
       runtime.emitRenderPassStart(

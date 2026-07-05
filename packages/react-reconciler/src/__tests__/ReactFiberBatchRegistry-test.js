@@ -306,11 +306,18 @@ describe('ReactFiberBatchRegistry', () => {
   describe('protocol handshake', () => {
     // Every capability bit this build implements AND pins with tests: batch
     // tokens, pass lifecycle, retirement, mutation window (S1); pass
-    // yield/resume edges + end disposition, discardAllWip (S3). Growing
-    // this constant is deliberate: a bit may only be added together with
-    // the runtime capability it names and the tests that pin it.
+    // yield/resume edges + end disposition, discardAllWip (S3); runInBatch
+    // (S4, pinned by ReactFiberRunInBatch-test.js). Growing this constant
+    // is deliberate: a bit may only be added together with the runtime
+    // capability it names and the tests that pin it.
     const IMPLEMENTED_CAPABILITIES =
-      (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 8);
+      (1 << 0) |
+      (1 << 1) |
+      (1 << 2) |
+      (1 << 3) |
+      (1 << 4) |
+      (1 << 6) |
+      (1 << 8);
 
     function getSharedInternals(ReactModule) {
       return ReactModule.__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE;

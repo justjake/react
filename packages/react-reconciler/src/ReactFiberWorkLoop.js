@@ -231,6 +231,7 @@ import {
 import {requestCurrentTransition} from './ReactFiberTransition';
 import {
   getOrMintBatchToken,
+  lookupBatchTokenLane,
   batchRegistryOnRootUpdated,
   batchRegistryOnRootFinished,
 } from './ReactFiberBatchRegistry';
@@ -421,6 +422,7 @@ import {
   flushSyncWorkOnLegacyRootsOnly,
   requestTransitionLane,
   ensureScheduleIsScheduled,
+  setRunInBatchTransitionLane,
 } from './ReactFiberRootScheduler';
 import {getMaskedContext, getUnmaskedContext} from './ReactFiberLegacyContext';
 import {logUncaughtError} from './ReactFiberErrorLogger';
@@ -932,7 +934,99 @@ registerExternalRuntimeProvider({
     return token;
   },
   discardAllWip: discardAllWorkInProgress,
+  runInBatch: runInBatchImpl,
 });
+
+/**
+ * Run `fn` so the React updates it schedules are attributed to the batch
+ * identified by `token` (cosignal spec §4.1 fact 4: lane-scoped scheduling).
+ * This is how an external store's late correction rides INSIDE a pending
+ * batch and commits with it — a fresh startTransition would mint a lane
+ * React never entangles with the batch, so the two could commit separately
+ * (torn).
+ *
+ * Contract, by token state:
+ * - LIVE deferred token (`token & 1` === 1): `fn` runs inside a transition
+ *   pinned to the batch's own lane. Every update it schedules — setState,
+ *   useOptimistic, even a nested startTransition — joins that lane, and
+ *   same-lane updates entangle through React's ordinary hook-queue path. An
+ *   external write inside `fn` classifies into the same batch:
+ *   getCurrentWriteBatch() returns `token`.
+ * - LIVE urgent token: `fn` runs at the batch's own event priority (the
+ *   lane it was minted from), outside any transition.
+ * - RETIRED or unknown token (including 0): the documented fallback — `fn`
+ *   runs urgent (discrete priority, outside any transition), so a corrective
+ *   update flushes pre-paint. Note a token counts as live through its
+ *   retiring commit's onRootCommitted report (retirement emits follow the
+ *   report), so a delivery issued inside that listener still lands on the
+ *   outgoing token's lane while later calls take this fallback.
+ *
+ * Legal from event handlers, effects (including layout effects and the
+ * commit-phase channel listeners), timers, and the yield gaps of an open
+ * pass frame — anywhere except the render phase, where update attribution
+ * belongs to the pass itself; callers who learn of work mid-render must
+ * queue it to the pass's yield or end edge instead.
+ *
+ * Scheduling into a batch whose pass already COMPLETED (but has not
+ * committed) forces React's ordinary pre-commit restart, so the batch still
+ * commits atomically, once, with the update included. `fn` runs
+ * synchronously and its result is returned; the pin covers only `fn`'s
+ * synchronous extent (updates scheduled by code `fn` merely arranges to run
+ * later — timers, awaited continuations — classify ambiently).
+ */
+function runInBatchImpl<R>(token: number, fn: () => R): R {
+  if ((executionContext & RenderContext) !== NoContext) {
+    throw new Error(
+      'runInBatch must not be called while React is rendering. Update ' +
+        'attribution during a render pass belongs to the pass itself; ' +
+        'queue the call until React has yielded, e.g. in a microtask or ' +
+        "at the pass's yield or end edge.",
+    );
+  }
+  const lane = lookupBatchTokenLane(token);
+  const prevTransition = ReactSharedInternals.T;
+  const previousPriority = getCurrentUpdatePriority();
+  // Save/restore unconditionally: nested runInBatch calls compose, with the
+  // innermost pin winning for its extent, and an urgent/fallback run must
+  // not leak an outer call's deferred pin into transitions started inside.
+  const previousRunInBatchLane = setRunInBatchTransitionLane(NoLane);
+  try {
+    if (lane !== NoLane && (token & 1) === 1) {
+      // Live deferred batch: pin the transition lane and enter a transition
+      // scope shaped like startTransition's (ReactFiberHooks), so
+      // requestUpdateLane takes the transition path for every update in fn.
+      setRunInBatchTransitionLane(lane);
+      const transition: Transition = {} as any;
+      if (enableViewTransition) {
+        transition.types =
+          prevTransition !== null ? prevTransition.types : null;
+      }
+      if (enableGestureTransition) {
+        transition.gesture = null;
+      }
+      if (enableTransitionTracing) {
+        transition.name = null;
+        transition.startTime = -1;
+      }
+      if (__DEV__) {
+        transition._updatedFibers = new Set();
+      }
+      ReactSharedInternals.T = transition;
+    } else {
+      // Live urgent batch: the lane it was minted from. Retired or unknown
+      // (lane === NoLane): the documented urgent fallback.
+      setCurrentUpdatePriority(
+        lane !== NoLane ? lanesToEventPriority(lane) : DiscreteEventPriority,
+      );
+      ReactSharedInternals.T = null;
+    }
+    return fn();
+  } finally {
+    setCurrentUpdatePriority(previousPriority);
+    ReactSharedInternals.T = prevTransition;
+    setRunInBatchTransitionLane(previousRunInBatchLane);
+  }
+}
 
 /**
  * Synchronously abandon every work-in-progress pass on every root (cosignal
@@ -3912,9 +4006,16 @@ function commitRoot(
   // Capture the expansion BEFORE markRootFinished clears the entanglement
   // bookkeeping. No same-root commit can have intervened since this pass
   // rendered (it would have discarded the pass), so this is the render-time
-  // expansion, at most grown by lanes whose updates stayed pending — and
-  // those are filtered out by the remainingLanes check in the registry.
+  // expansion, at most grown by lanes whose updates stayed pending — those
+  // are filtered out by the registry's remainingLanes check, except when
+  // NEW updates re-pended a lane this pass really rendered (mid-render
+  // runInBatch delivery / merge-rule lane reuse), which the registry
+  // reports as a committed-view advance using the re-pended lanes below
+  // and its render-time stash.
   const entangledFinishedLanes = getEntangledLanes(root, lanes);
+  // Lanes holding updates that arrived while this pass was rendering (or
+  // waiting to commit): what keeps a rendered lane in remainingLanes.
+  const rependedLanes = mergeLanes(updatedLanes, concurrentlyUpdatedLanes);
 
   markRootFinished(
     root,
@@ -3934,7 +4035,12 @@ function commitRoot(
   // External-runtime batch registry (finish edge): lanes leaving
   // root.pendingLanes retire their batch tokens, exactly once, at the same
   // moment React's own books change.
-  batchRegistryOnRootFinished(root, entangledFinishedLanes, root.pendingLanes);
+  batchRegistryOnRootFinished(
+    root,
+    entangledFinishedLanes,
+    root.pendingLanes,
+    rependedLanes,
+  );
 
   // Reset this before firing side effects so we can detect recursive updates.
   didIncludeCommitPhaseUpdate = false;

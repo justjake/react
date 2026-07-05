@@ -88,6 +88,29 @@ let nextTokenSerial = 1;
 // committed-batch tables).
 const rootCommitGenerations: WeakMap<FiberRoot, number> = new WeakMap();
 
+// The RENDER-TIME entangled expansion of the pass most recently started on
+// each root — exactly the lanes whose then-queued updates that pass
+// consumed. Captured at the pass's fresh stack (see notifyRenderPassStart)
+// and consumed by the finish edge, where it distinguishes a lane the
+// committing pass really rendered (updates visible in the committed tree)
+// from a lane the COMMIT-TIME expansion merely grew to include — e.g. a
+// lane first entangled by an update that arrived while the pass was already
+// rendering, whose updates are NOT in the committed tree.
+const renderedLanesByRoot: WeakMap<FiberRoot, Lanes> = new WeakMap();
+
+/**
+ * Called (unconditionally — bookkeeping must not depend on listeners) when
+ * a render pass starts on `root` with a fresh stack. `lanes` are the lanes
+ * that named the render; the stash records their render-time entangled
+ * expansion.
+ */
+export function batchRegistryOnRenderStart(
+  root: FiberRoot,
+  lanes: Lanes,
+): void {
+  renderedLanesByRoot.set(root, getEntangledLanes(root, lanes));
+}
+
 function slotFor(lane: Lane): Slot {
   const index = 31 - Math.clz32(lane);
   let slot = slots[index];
@@ -112,6 +135,26 @@ export function getOrMintBatchToken(
     slot.token = nextTokenSerial++ * 2 + (isDeferred ? 1 : 0);
   }
   return slot.token;
+}
+
+/**
+ * The lane a LIVE token's batch occupies, or NoLane (0) when the token is
+ * retired, unknown, or 0 ("no batch"). Used by runInBatch to resolve its
+ * scheduling target: a token is live exactly while its slot still holds it,
+ * including the window inside its retiring commit's onRootCommitted report
+ * (retirement emits are deferred until after that report, so a write
+ * delivered there lands on the outgoing token — the documented merge rule).
+ */
+export function lookupBatchTokenLane(token: BatchToken): Lane {
+  if (token !== 0) {
+    for (let index = 0; index < slots.length; index++) {
+      const slot = slots[index];
+      if (slot !== null && slot.token === token) {
+        return (1 << index) as any;
+      }
+    }
+  }
+  return 0 as any; // NoLane
 }
 
 /**
@@ -179,6 +222,19 @@ export function batchRegistryBackfillRoot(root: FiberRoot): void {
  * merge-on-lane-reuse rule already covers reused lanes, and the retirement
  * edge still fires exactly once, after).
  *
+ * `rependedLanes` are lanes holding NEW updates that arrived while the
+ * committing pass was rendering (or waiting to commit): a lane can be in
+ * `remainingLanes` either because this commit did not touch its batch, or
+ * because the pass rendered the batch's updates and fresh ones re-pended
+ * the lane (a mid-render runInBatch delivery, or the merge rule reusing a
+ * live lane). The second case is a real committed-view advance on this
+ * root — the committed tree shows the writes the pass rendered — so it is
+ * reported and locked in (committedRoots) while the batch stays pending;
+ * the follow-up commit that lands the newer updates reports the batch on
+ * this root again. Requiring the lane in the RENDER-TIME expansion keeps
+ * lanes that merely got entangled mid-flight (updates not in this tree)
+ * out of the report.
+ *
  * Cost: iterates only slots holding live tokens (typically 0–2), plus one
  * WeakMap bump per commit.
  */
@@ -186,11 +242,20 @@ export function batchRegistryOnRootFinished(
   root: FiberRoot,
   finishedLanes: Lanes,
   remainingLanes: Lanes,
+  rependedLanes: Lanes,
 ): void {
   const previousGeneration = rootCommitGenerations.get(root);
   const generation =
     previousGeneration === undefined ? 1 : previousGeneration + 1;
   rootCommitGenerations.set(root, generation);
+
+  const renderedLanesStash = renderedLanesByRoot.get(root);
+  const renderedLanes =
+    renderedLanesStash === undefined
+      ? // No recorded pass start for this commit (exotic path): fall back
+        // to the commit-time expansion, which can only over-approximate.
+        finishedLanes
+      : renderedLanesStash;
 
   let committedTokens: Array<BatchToken> | null = null;
   let retirements: Array<{slot: Slot, committed: boolean}> | null = null;
@@ -205,10 +270,32 @@ export function batchRegistryOnRootFinished(
       continue;
     }
     const lane = 1 << index;
-    if ((remainingLanes & lane) !== 0) {
-      continue; // still pending on this root
-    }
     const roots = slot.roots;
+    if ((remainingLanes & lane) !== 0) {
+      // Still pending on this root — untouched by this commit, UNLESS the
+      // committing pass rendered the batch's updates and only newer,
+      // re-pending updates keep the lane alive: then this commit advanced
+      // the root's committed view by those rendered writes. Report it and
+      // lock the batch into this root's later passes; it does not finish
+      // here.
+      if (
+        (rependedLanes & lane) !== 0 &&
+        (finishedLanes & lane) !== 0 &&
+        (renderedLanes & lane) !== 0 &&
+        roots !== null &&
+        roots.has(root)
+      ) {
+        if (committedTokens === null) {
+          committedTokens = [];
+        }
+        committedTokens.push(token);
+        if (slot.committedRoots === null) {
+          slot.committedRoots = new Set();
+        }
+        slot.committedRoots.add(root);
+      }
+      continue;
+    }
     if (roots === null || !roots.has(root)) {
       continue; // this batch never had work on this root
     }
@@ -244,6 +331,9 @@ export function batchRegistryOnRootFinished(
       slot.committedRoots.add(root);
     }
   }
+
+  // The stash described the pass this commit landed; it is consumed.
+  renderedLanesByRoot.delete(root);
 
   const runtime = getExternalRuntime();
   if (runtime !== null && runtime.hasListeners) {

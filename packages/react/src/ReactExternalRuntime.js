@@ -85,6 +85,11 @@ import reportGlobalError from 'shared/reportGlobalError';
 //           commit/discard edge — onRenderPassEnd carries the
 //           disposition and fires at the commit (before that commit's
 //           onRootCommitted) or at the discard, NOT at render completion
+//   1 << 6  runInBatch — unstable_runInBatch(token, fn) runs fn so the
+//           React updates it schedules join the token's batch: its own
+//           lane for a live batch (pinned transition for deferred tokens,
+//           the minting event priority for urgent ones), with the
+//           documented urgent fallback once the token has retired
 //   1 << 8  discardAllWip — unstable_discardAllWip synchronously abandons
 //           every work-in-progress pass on every root: each open frame
 //           closes with the discard disposition before the call returns,
@@ -96,11 +101,10 @@ import reportGlobalError from 'shared/reportGlobalError';
 //           existence-proof minimal form; the bit flips only when the
 //           full fact — including the spec §4.2 intra-commit ordering
 //           guarantee, fork test 26 — is implemented and pinned)
-//   1 << 6  runInBatch (lane-scoped scheduling)
 //   1 << 7  render lineage ids
 export const EXTERNAL_RUNTIME_PROTOCOL_VERSION = 1;
 export const EXTERNAL_RUNTIME_CAPABILITIES =
-  (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 8);
+  (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 6) | (1 << 8);
 
 export type ExternalRuntimeProtocol = {
   version: number,
@@ -183,6 +187,11 @@ export type ExternalRuntimeProviderMethods = {
    * re-scheduled as fresh passes. Throws if called while the renderer is
    * rendering or committing. */
   discardAllWip: () => void,
+  /** Run `fn` so the React updates it schedules join `token`'s batch (its
+   * own lane while the token is live; the urgent fallback once it has
+   * retired). Returns fn's result. Throws if called while the renderer is
+   * rendering. */
+  runInBatch: <R>(token: number, fn: () => R) => R,
 };
 
 export type ExternalRuntimeProvider = {
@@ -341,4 +350,19 @@ export function externalRuntimeDiscardAllWip(): void {
   for (let i = 0; i < providers.length; i++) {
     providers[i].discardAllWip();
   }
+}
+
+export function externalRuntimeRunInBatch<R>(token: number, fn: () => R): R {
+  const providers = runtime.providers;
+  if (providers.length === 0) {
+    // No renderer has registered a provider, so no batch can be live and
+    // there is no renderer scheduling state to pin: this is the retired-
+    // token fallback with nothing to make urgent. Run fn plainly.
+    return fn();
+  }
+  // Tokens are minted by a renderer's reconciler; with several renderers
+  // loaded, attribution is best-effort through the first (the documented
+  // multi-renderer limitation above). A token the first renderer does not
+  // recognize takes its retired-token urgent fallback.
+  return providers[0].runInBatch(token, fn);
 }

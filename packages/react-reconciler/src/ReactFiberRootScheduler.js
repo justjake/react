@@ -707,12 +707,33 @@ function scheduleImmediateRootScheduleTask() {
   }
 }
 
+// External-runtime lane pin (see runInBatch in ReactFiberWorkLoop): while a
+// runInBatch callback for a live deferred batch runs, transition updates are
+// assigned that batch's own lane instead of the current event's transition
+// lane. A dedicated override — rather than temporarily mutating
+// currentEventTransitionLane — keeps the event's own bookkeeping (eager
+// transition flush, default-indicator decisions, the close-edge reset, and
+// didCurrentEventScheduleTransition) untouched by the pin.
+let runInBatchTransitionLane: Lane = NoLane;
+
+export function setRunInBatchTransitionLane(lane: Lane): Lane {
+  const previous = runInBatchTransitionLane;
+  runInBatchTransitionLane = lane;
+  return previous;
+}
+
 export function requestTransitionLane(
   // This argument isn't used, it's only here to encourage the caller to
   // check that it's inside a transition before calling this function.
   // TODO: Make this non-nullable. Requires a tweak to useOptimistic.
   transition: Transition | null,
 ): Lane {
+  if (runInBatchTransitionLane !== NoLane) {
+    // Inside a runInBatch callback for a live deferred batch: updates join
+    // that batch's lane. (Same-lane updates entangle through the ordinary
+    // hook-queue entanglement path, exactly as same-event transitions do.)
+    return runInBatchTransitionLane;
+  }
   // The algorithm for assigning an update to a lane should be stable for all
   // updates at the same priority within the same event. To do this, the
   // inputs to the algorithm must be the same.
