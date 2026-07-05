@@ -88,6 +88,11 @@ type InstanceMeasurement = null;
 type SuspenseyCommitSubscription = {
   pendingCount: number,
   commit: null | (() => void),
+  // True when React canceled this pending commit (an update interrupted it
+  // and forced a pre-commit restart). A canceled subscription is inert:
+  // resources resolving later skip it, like the DOM renderer's nulled
+  // `unsuspend`, instead of hitting the missing-commit invariant below.
+  canceled: boolean,
 };
 
 export opaque type SuspendedState = SuspenseyCommitSubscription;
@@ -334,6 +339,7 @@ function createReactNoop(
     return {
       pendingCount: 0,
       commit: null,
+      canceled: false,
     };
   }
 
@@ -381,6 +387,7 @@ function createReactNoop(
         state.commit = commit;
         const cancelCommit = () => {
           state.commit = null;
+          state.canceled = true;
         };
         return cancelCommit;
       };
@@ -1377,6 +1384,12 @@ function createReactNoop(
                 const commit = subscription.commit;
                 subscription.commit = null;
                 if (commit === null) {
+                  if (subscription.canceled) {
+                    // React canceled this pending commit (an update
+                    // interrupted it and forced a pre-commit restart);
+                    // nothing to fire.
+                    continue;
+                  }
                   throw new Error(
                     'Expected commit to be a function. This is a bug in React.',
                   );
