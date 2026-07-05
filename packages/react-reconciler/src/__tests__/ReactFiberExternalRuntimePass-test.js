@@ -72,11 +72,12 @@ describe('ReactFiberExternalRuntimePass', () => {
       retired: [],
     };
     const unsubscribe = React.unstable_subscribeToExternalRuntime({
-      onRenderPassStart(container, includedBatches) {
+      onRenderPassStart(container, includedBatches, lineageId) {
         const entry = {
           type: 'passStart',
           container,
           included: includedBatches.slice(),
+          lineage: lineageId,
         };
         events.log.push(entry);
         events.passes.push(entry);
@@ -996,5 +997,344 @@ describe('ReactFiberExternalRuntimePass', () => {
     expect(sameRootCommitsDuringOpenPass).toBe(0);
     expect(crossRootCommitsDuringOpenPass).toBeGreaterThanOrEqual(1);
     unsubscribe();
+  });
+
+  // Spec test 20 — render lineage ids (fact 5). onRenderPassStart's third
+  // argument is stable per (root × batch-set): the same id for every pass
+  // over the same set (restarts, replays, Suspense retries, post-discard
+  // fresh passes), a new id for a different set (an extra batch rebased in,
+  // a fresh batch after commit), a different id per root for a spanning
+  // set, and dead at the set's commit — never reported again.
+  describe('render lineage', () => {
+    it('a restart after an urgent interrupt keeps the lineage; the urgent pass has its own', async () => {
+      const {events, unsubscribe} = subscribe();
+      let setValue;
+      let setUrgent;
+      function App() {
+        const [value, _setValue] = useState(0);
+        const [urgent, _setUrgent] = useState(0);
+        setValue = _setValue;
+        setUrgent = _setUrgent;
+        return (
+          <>
+            <Text text={`U${urgent}`} />
+            <Text text={`A${value}`} />
+            <Text text={`B${value}`} />
+          </>
+        );
+      }
+      const root = ReactNoop.createRoot();
+      await act(() => {
+        root.render(<App />);
+      });
+      assertLog(['U0', 'A0', 'B0']);
+      const mountLineage = events.passes[0].lineage;
+      expect(mountLineage).toBeGreaterThan(0);
+
+      let t = null;
+      await act(async () => {
+        startTransition(() => {
+          t = React.unstable_getCurrentWriteBatch();
+          setValue(1);
+        });
+        await waitFor(['U0', 'A1']);
+        // Urgent interrupt discards the yielded pass; the transition
+        // restarts from scratch afterwards.
+        ReactNoop.flushSync(() => {
+          setUrgent(1);
+        });
+        assertLog(['U1', 'A0', 'B0']);
+        await waitForAll(['U1', 'A1', 'B1']);
+      });
+
+      const tPasses = events.passes.filter(p => p.included.includes(t));
+      expect(tPasses.length).toBe(2); // original + post-interrupt restart
+      // Same batch-set ⇒ same lineage, across the restart.
+      expect(tPasses[1].lineage).toBe(tPasses[0].lineage);
+      // The interposed urgent pass renders a different (empty) batch-set on
+      // lanes of its own: a different lineage.
+      const urgentPass = events.passes.find(
+        p => !p.included.includes(t) && events.passes.indexOf(p) > 0,
+      );
+      expect(urgentPass.lineage).not.toBe(tPasses[0].lineage);
+      expect(checkFrameInvariants(events.log)).toEqual([]);
+      unsubscribe();
+    });
+
+    it('a Suspense retry finds the same lineage; the set is dead after its commit', async () => {
+      const {events, unsubscribe} = subscribe();
+      let resolveGate;
+      const gate = new Promise(resolve => {
+        resolveGate = resolve;
+      });
+      let setShow;
+      let setShow2;
+      function App() {
+        const [show, _setShow] = useState(false);
+        const [show2, _setShow2] = useState(false);
+        setShow = _setShow;
+        setShow2 = _setShow2;
+        if (show) {
+          React.use(gate); // suspends the transition's render
+        }
+        return <Text text={`show=${show} show2=${show2}`} />;
+      }
+      const root = ReactNoop.createRoot();
+      await act(() => {
+        root.render(<App />);
+      });
+      assertLog(['show=false show2=false']);
+
+      let t = null;
+      await act(() => {
+        startTransition(() => {
+          t = React.unstable_getCurrentWriteBatch();
+          setShow(true);
+        });
+      });
+      // Suspended: no commit yet; at least one pass over [t] was attempted.
+      const suspendedPasses = events.passes.filter(p => p.included.includes(t));
+      expect(suspendedPasses.length).toBeGreaterThanOrEqual(1);
+      const lineage = suspendedPasses[0].lineage;
+      suspendedPasses.forEach(p => {
+        expect(p.lineage).toBe(lineage);
+      });
+      expect(events.retired.map(r => r.token)).not.toContain(t);
+
+      // The data arrives: the retry is a pass over the SAME batch-set with
+      // the SAME lineage, and it commits.
+      resolveGate();
+      await act(() => gate);
+      assertLog(['show=true show2=false']);
+      const allTPasses = events.passes.filter(p => p.included.includes(t));
+      expect(allTPasses.length).toBeGreaterThan(suspendedPasses.length - 1);
+      allTPasses.forEach(p => {
+        expect(p.lineage).toBe(lineage);
+      });
+      expect(events.retired.filter(r => r.token === t)).toEqual([
+        {type: 'retired', token: t, committed: true},
+      ]);
+
+      // Death at commit: a NEW transition on the same root — a new
+      // batch-set — reports a fresh lineage.
+      let t2 = null;
+      await act(() => {
+        startTransition(() => {
+          t2 = React.unstable_getCurrentWriteBatch();
+          setShow2(true);
+        });
+      });
+      assertLog(['show=true show2=true']);
+      const t2Pass = events.passes.find(p => p.included.includes(t2));
+      expect(t2Pass.lineage).not.toBe(lineage);
+      expect(checkFrameInvariants(events.log)).toEqual([]);
+      unsubscribe();
+    });
+
+    // The rebase schedule is test 21's: pass 1 completes and its commit
+    // suspends on an image; a second transition discards that pending
+    // commit and rebases BOTH batches into one fresh pass.
+    // @gate enableViewTransition
+    it('a restart that picks up an extra batch is a different batch-set: new lineage', async () => {
+      const {events, unsubscribe} = subscribe();
+      let setSrc;
+      function App() {
+        const [src, _setSrc] = useState(null);
+        setSrc = _setSrc;
+        return (
+          <ViewTransition>
+            <Text text={src === null ? 'empty' : `showing ${src}`} />
+            {src !== null ? <suspensey-thing src={src} /> : null}
+          </ViewTransition>
+        );
+      }
+      const root = ReactNoop.createRoot();
+      await act(() => {
+        root.render(<App />);
+      });
+      assertLog(['empty']);
+
+      let t1 = null;
+      await act(() => {
+        startTransition(() => {
+          t1 = React.unstable_getCurrentWriteBatch();
+          setSrc('A');
+        });
+      });
+      assertLog(['showing A']);
+      expect(ReactNoop.getSuspenseyThingStatus('A')).toBe('pending');
+
+      let t2 = null;
+      await act(() => {
+        startTransition(() => {
+          t2 = React.unstable_getCurrentWriteBatch();
+          setSrc('B');
+        });
+      });
+      assertLog(['showing B']);
+      expect(t2).not.toBe(t1);
+
+      const soloPass = events.passes.find(
+        p => p.included.includes(t1) && !p.included.includes(t2),
+      );
+      const jointPass = events.passes.find(
+        p => p.included.includes(t1) && p.included.includes(t2),
+      );
+      expect(soloPass).not.toBe(undefined);
+      expect(jointPass).not.toBe(undefined);
+      // {t1} and {t1, t2} are different batch-sets: different lineages.
+      expect(jointPass.lineage).not.toBe(soloPass.lineage);
+
+      await act(() => {
+        ReactNoop.resolveSuspenseyThing('B');
+      });
+      expect(checkFrameInvariants(events.log)).toEqual([]);
+      unsubscribe();
+    });
+
+    it('token-free batches do not share a lineage across events', async () => {
+      const {events, unsubscribe} = subscribe();
+      let setValue;
+      function App() {
+        const [value, _setValue] = useState(0);
+        setValue = _setValue;
+        return <Text text={`v${value}`} />;
+      }
+      const root = ReactNoop.createRoot();
+      await act(() => {
+        root.render(<App />);
+      });
+      assertLog(['v0']);
+
+      // Two transitions with NO external writes: neither mints a token, so
+      // their included sets are both empty — but they are different
+      // batches, and their lineages must differ (the id keys on the lanes
+      // too, not the token set alone).
+      await act(() => {
+        startTransition(() => {
+          setValue(1);
+        });
+      });
+      assertLog(['v1']);
+      await act(() => {
+        startTransition(() => {
+          setValue(2);
+        });
+      });
+      assertLog(['v2']);
+
+      const tokenFreePasses = events.passes.slice(1);
+      expect(tokenFreePasses.length).toBe(2);
+      expect(tokenFreePasses[0].included).toEqual([]);
+      expect(tokenFreePasses[1].included).toEqual([]);
+      expect(tokenFreePasses[1].lineage).not.toBe(tokenFreePasses[0].lineage);
+      expect(checkFrameInvariants(events.log)).toEqual([]);
+      unsubscribe();
+    });
+
+    it('a spanning batch has a different lineage per root', async () => {
+      const {events, unsubscribe} = subscribe();
+      let resolveGate;
+      const gate = new Promise(resolve => {
+        resolveGate = resolve;
+      });
+      let setA;
+      let setB;
+      function CompA() {
+        const [on, _set] = useState(false);
+        setA = _set;
+        return <Text text={`A on=${on}`} />;
+      }
+      function CompB() {
+        const [on, _set] = useState(false);
+        setB = _set;
+        if (on) {
+          React.use(gate);
+        }
+        return <Text text={`B on=${on}`} />;
+      }
+      const rootA = ReactNoop.createRoot();
+      await act(() => {
+        rootA.render(<CompA />);
+      });
+      assertLog(['A on=false']);
+      const containerA = events.passes[events.passes.length - 1].container;
+      const rootB = ReactNoop.createRoot();
+      await act(() => {
+        rootB.render(<CompB />);
+      });
+      assertLog(['B on=false']);
+      const containerB = events.passes[events.passes.length - 1].container;
+
+      let t = null;
+      await act(() => {
+        startTransition(() => {
+          t = React.unstable_getCurrentWriteBatch();
+          setA(true);
+          setB(true);
+        });
+      });
+      assertLog(['A on=true']);
+
+      const aPass = events.passes.find(
+        p => p.container === containerA && p.included.includes(t),
+      );
+      const bPass = events.passes.find(
+        p => p.container === containerB && p.included.includes(t),
+      );
+      expect(aPass).not.toBe(undefined);
+      expect(bPass).not.toBe(undefined);
+      // Same batch-set, two roots: lineage is per (root × batch-set).
+      expect(bPass.lineage).not.toBe(aPass.lineage);
+
+      resolveGate();
+      await act(() => gate);
+      assertLog(['B on=true']);
+      expect(checkFrameInvariants(events.log)).toEqual([]);
+      unsubscribe();
+    });
+
+    it('discardAllWip abandons passes, not batches: the fresh pass keeps the lineage', async () => {
+      const {events, unsubscribe} = subscribe();
+      let setValue;
+      function App() {
+        const [value, _setValue] = useState(0);
+        setValue = _setValue;
+        return (
+          <>
+            <Text text={`A${value}`} />
+            <Text text={`B${value}`} />
+            <Text text={`C${value}`} />
+          </>
+        );
+      }
+      const root = ReactNoop.createRoot();
+      await act(() => {
+        root.render(<App />);
+      });
+      assertLog(['A0', 'B0', 'C0']);
+
+      let t = null;
+      await act(async () => {
+        startTransition(() => {
+          t = React.unstable_getCurrentWriteBatch();
+          setValue(1);
+        });
+        await waitFor(['A1']);
+        React.unstable_discardAllWip();
+        await waitForAll(['A1', 'B1', 'C1']);
+      });
+
+      const tPasses = events.passes.filter(p => p.included.includes(t));
+      expect(tPasses.length).toBe(2); // original + post-discard fresh pass
+      // The batch survived the discard, so its lineage did too: the retry
+      // finds the same identity (its capsules, in binding terms).
+      expect(tPasses[1].lineage).toBe(tPasses[0].lineage);
+      expect(events.retired.filter(r => r.token === t)).toEqual([
+        {type: 'retired', token: t, committed: true},
+      ]);
+      expect(checkFrameInvariants(events.log)).toEqual([]);
+      unsubscribe();
+    });
   });
 });

@@ -90,6 +90,11 @@ import reportGlobalError from 'shared/reportGlobalError';
 //           lane for a live batch (pinned transition for deferred tokens,
 //           the minting event priority for urgent ones), with the
 //           documented urgent fallback once the token has retired
+//   1 << 7  render lineage ids — onRenderPassStart delivers a lineage id
+//           that is stable per (root × batch-set) across restarts,
+//           replays, and Suspense retries, and dead once the set commits
+//           on that root or its work is abandoned. Suspense thenable
+//           capsules key on it
 //   1 << 8  discardAllWip — unstable_discardAllWip synchronously abandons
 //           every work-in-progress pass on every root: each open frame
 //           closes with the discard disposition before the call returns,
@@ -101,10 +106,16 @@ import reportGlobalError from 'shared/reportGlobalError';
 //           existence-proof minimal form; the bit flips only when the
 //           full fact — including the spec §4.2 intra-commit ordering
 //           guarantee, fork test 26 — is implemented and pinned)
-//   1 << 7  render lineage ids
 export const EXTERNAL_RUNTIME_PROTOCOL_VERSION = 1;
 export const EXTERNAL_RUNTIME_CAPABILITIES =
-  (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 6) | (1 << 8);
+  (1 << 0) |
+  (1 << 1) |
+  (1 << 2) |
+  (1 << 3) |
+  (1 << 4) |
+  (1 << 6) |
+  (1 << 7) |
+  (1 << 8);
 
 export type ExternalRuntimeProtocol = {
   version: number,
@@ -121,10 +132,24 @@ export type ExternalRuntimeListener = {
    * callstack, NOT per frame: code running in a yield gap or while a
    * completed tree waits to commit observes getRenderContext() === null even
    * though the frame is open — keying any decision to the wall-clock
-   * [start, end) interval is wrong. */
+   * [start, end) interval is wrong.
+   *
+   * `lineageId` is the render-lineage identity: a positive integer stable
+   * per (root × batch-set). Every pass on this root rendering the same set
+   * of batches — restarts after an interruption, replays, Suspense retries,
+   * fresh passes after discardAllWip — reports the SAME id, and the id is
+   * dead (never reported again) once the set commits on this root or its
+   * work is abandoned. A pass over a different set (a restart that picked
+   * up an extra batch, a pass after a spanning batch locked in) reports a
+   * new id, and the same batch-set spanning two roots has a different id
+   * per root. Single tokens, mask unions, and pass serial numbers are all
+   * wrong keys for cross-pass state (they drift, churn, or refetch
+   * forever); this id is the intended key, e.g. for Suspense thenable
+   * capsules. */
   onRenderPassStart?: (
     container: mixed,
     includedBatches: $ReadOnlyArray<number>,
+    lineageId: number,
   ) => void,
   /** The pass on `container` yielded to the event loop with its tree
    * unfinished; the frame stays open. Fires at most once per gap:
@@ -229,6 +254,7 @@ export type ExternalRuntime = {
   emitRenderPassStart: (
     container: mixed,
     includedBatches: $ReadOnlyArray<number>,
+    lineageId: number,
   ) => void,
   emitRenderPassYield: (container: mixed) => void,
   emitRenderPassResume: (container: mixed) => void,
@@ -250,8 +276,8 @@ const runtime: ExternalRuntime = {
   },
   providers: [],
   hasListeners: false,
-  emitRenderPassStart(container, includedBatches) {
-    emit('onRenderPassStart', container, includedBatches);
+  emitRenderPassStart(container, includedBatches, lineageId) {
+    emit('onRenderPassStart', container, includedBatches, lineageId);
   },
   emitRenderPassYield(container) {
     emit('onRenderPassYield', container);

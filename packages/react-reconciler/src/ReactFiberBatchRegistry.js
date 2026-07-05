@@ -111,6 +111,77 @@ export function batchRegistryOnRenderStart(
   renderedLanesByRoot.set(root, getEntangledLanes(root, lanes));
 }
 
+// ── Render lineage ids (cosignal spec §4.1 fact 5) ──────────────────────────
+//
+// A lineage id is stable per (root × batch-set): every pass on a root that
+// renders the same set of batches — across restarts, replays, and Suspense
+// retries — reports the same id, and the id dies when the set commits on
+// that root or its work is abandoned (pruned). Consumers key Suspense
+// thenable capsules on it (spec §5.8): a retry must find the capsule its
+// suspended predecessor minted, and a pass over a DIFFERENT batch-set (a
+// restart that picked up an extra batch, a pass after a spanning batch
+// locked in) must not.
+//
+// The key is the pass's included token set (canonicalized) PLUS its
+// render-time entangled lanes. Tokens alone under-determine the batch-set:
+// a batch with no external writes never mints a token, and two unrelated
+// token-free transitions must not share a lineage — their lanes tell them
+// apart. Lanes alone under-determine it too: a root's later passes carry
+// still-pending batches the root already committed (committedRoots lock-in)
+// whose lanes are not render lanes on this root, and a pass before that
+// lock-in is a different batch-set from a pass after it. Lane recycling
+// cannot alias keys: reusing a live lane merges the batches (the registry's
+// explicit merge rule — same set), and a retired lane's entries died with
+// their set's commit or abandonment.
+//
+// Death: an entry dies at the first commit after which any of its lanes is
+// no longer pending on the root — its set committed here (lanes finished),
+// or its work was pruned (deletion resolved the lane), or a restart's
+// superset pass committed it. A commit that leaves every lane pending (an
+// unrelated batch's commit, or the mid-render re-pend split above) does not
+// kill it: the set is still in flight and its retries still need their
+// capsules. discardAllWip abandons passes, not batches — lanes stay
+// pending, so lineages survive and the re-scheduled fresh passes report
+// the same ids.
+type LineageEntry = {id: number, lanes: Lanes};
+const rootLineages: WeakMap<
+  FiberRoot,
+  Map<string, LineageEntry>,
+> = new WeakMap();
+let nextLineageId = 1;
+
+/**
+ * The lineage id for a pass on `root` rendering `lanes`, whose included
+ * batches are `tokens` (as computed by batchTokensForRender). Mints on
+ * first sight of the (root × batch-set); returns the existing id for every
+ * later pass over the same set.
+ */
+export function lineageForRender(
+  root: FiberRoot,
+  lanes: Lanes,
+  tokens: Array<BatchToken>,
+): number {
+  const entangledRenderLanes = getEntangledLanes(root, lanes);
+  const key =
+    tokens
+      .slice()
+      .sort((a, b) => a - b)
+      .join(',') +
+    '|' +
+    entangledRenderLanes;
+  let lineages = rootLineages.get(root);
+  if (lineages === undefined) {
+    lineages = new Map();
+    rootLineages.set(root, lineages);
+  }
+  let entry = lineages.get(key);
+  if (entry === undefined) {
+    entry = {id: nextLineageId++, lanes: entangledRenderLanes};
+    lineages.set(key, entry);
+  }
+  return entry.id;
+}
+
 function slotFor(lane: Lane): Slot {
   const index = 31 - Math.clz32(lane);
   let slot = slots[index];
@@ -334,6 +405,20 @@ export function batchRegistryOnRootFinished(
 
   // The stash described the pass this commit landed; it is consumed.
   renderedLanesByRoot.delete(root);
+
+  // Lineage death (see the lineage comment above): entries whose lanes are
+  // no longer all pending on this root died with this commit — their set
+  // committed here or was pruned. Runs unconditionally so death does not
+  // depend on subscription timing; the map is empty until a pass was
+  // observed.
+  const lineages = rootLineages.get(root);
+  if (lineages !== undefined && lineages.size > 0) {
+    lineages.forEach((entry, key) => {
+      if ((entry.lanes & remainingLanes) !== entry.lanes) {
+        lineages.delete(key);
+      }
+    });
+  }
 
   const runtime = getExternalRuntime();
   if (runtime !== null && runtime.hasListeners) {

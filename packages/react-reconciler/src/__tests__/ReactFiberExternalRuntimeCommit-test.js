@@ -633,4 +633,72 @@ describe('ReactFiberExternalRuntimeCommit', () => {
     expect(commitsOn(events, container).length).toBe(2);
     unsubscribe();
   });
+
+  // Spec test 23: roots are identified by their container, stable for the
+  // root's whole life across every event kind — and a portal's updates
+  // belong to the root whose fiber tree contains it: every channel event
+  // reports the PARENT root's container, never the portal target, and the
+  // render context inside portal-hosted components names the parent root.
+  it('root ids are stable and portals report the parent root', async () => {
+    const {events, unsubscribe} = subscribe();
+    const portalTarget = ReactNoop.getOrCreateRootContainer('portal-target');
+    const renderContexts = [];
+    let setValue;
+    function Inner() {
+      const [value, _setValue] = useState(0);
+      setValue = _setValue;
+      renderContexts.push(React.unstable_getRenderContext());
+      return <Text text={`portal v=${value}`} />;
+    }
+    function App() {
+      return (
+        <>
+          <Text text="host" />
+          {ReactNoop.createPortal(<Inner />, portalTarget, null)}
+        </>
+      );
+    }
+    const root = ReactNoop.createRoot();
+    await act(() => {
+      root.render(<App />);
+    });
+    assertLog(['host', 'portal v=0']);
+    const container = lastContainer(events);
+    expect(container).not.toBe(portalTarget);
+
+    // An update INSIDE the portal subtree: classified, rendered, and
+    // committed against the parent root's container.
+    let token = null;
+    await act(() => {
+      startTransition(() => {
+        token = React.unstable_getCurrentWriteBatch();
+        setValue(1);
+      });
+    });
+    assertLog(['portal v=1']);
+
+    // The portal's committed output landed in the portal target...
+    expect(portalTarget.children.length).toBeGreaterThan(0);
+    // ...but every channel event named the parent root, with a stable
+    // container identity across mount, transition, pass, commit, and
+    // retirement, and no event ever named the portal target.
+    events.log.forEach(e => {
+      if (e.container !== undefined) {
+        expect(e.container).toBe(container);
+      }
+    });
+    const tokenCommit = events.commits.find(c => c.tokens.includes(token));
+    expect(tokenCommit).not.toBe(undefined);
+    expect(tokenCommit.container).toBe(container);
+    // Per-callstack render context inside the portal names the parent root.
+    expect(renderContexts.length).toBeGreaterThanOrEqual(2);
+    renderContexts.forEach(ctx => {
+      expect(ctx).not.toBe(null);
+      expect(ctx.container).toBe(container);
+    });
+    expect(events.retired.filter(r => r.token === token)).toEqual([
+      {type: 'retired', token, committed: true},
+    ]);
+    unsubscribe();
+  });
 });

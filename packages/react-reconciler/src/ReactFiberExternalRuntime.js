@@ -18,6 +18,7 @@ import ReactSharedInternals from 'shared/ReactSharedInternals';
 import {
   batchTokensForRender,
   batchRegistryOnRenderStart,
+  lineageForRender,
 } from './ReactFiberBatchRegistry';
 
 /**
@@ -41,7 +42,14 @@ import {
 // between separately built react and renderer packages.
 const EXTERNAL_RUNTIME_PROTOCOL_VERSION = 1;
 const EXTERNAL_RUNTIME_CAPABILITIES =
-  (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 6) | (1 << 8);
+  (1 << 0) |
+  (1 << 1) |
+  (1 << 2) |
+  (1 << 3) |
+  (1 << 4) |
+  (1 << 6) |
+  (1 << 7) |
+  (1 << 8);
 
 export function getExternalRuntime(): ExternalRuntime | null {
   // The runtime exists once the isomorphic `react` module has evaluated.
@@ -155,9 +163,11 @@ export function notifyRenderPassStart(root: FiberRoot, lanes: Lanes): void {
     batchRegistryOnRenderStart(root, lanes);
     rootsWithActivePass.add(root);
     if (runtime.hasListeners) {
+      const includedBatches = batchTokensForRender(root, lanes);
       runtime.emitRenderPassStart(
         root.containerInfo,
-        batchTokensForRender(root, lanes),
+        includedBatches,
+        lineageForRender(root, lanes, includedBatches),
       );
     }
   }
