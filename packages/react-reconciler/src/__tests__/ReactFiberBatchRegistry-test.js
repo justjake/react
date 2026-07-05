@@ -75,7 +75,10 @@ describe('ReactFiberBatchRegistry', () => {
       });
     });
     expect(t1a).toBe(t1b);
-    expect(t1a.deferred).toBe(true);
+    // Tokens are non-zero integers; the low bit is the deferred flag.
+    expect(Number.isInteger(t1a)).toBe(true);
+    expect(t1a).toBeGreaterThan(0);
+    expect(t1a & 1).toBe(1);
     expect(t2).not.toBe(t1a);
     // Both store-only batches retired uncommitted at their event close.
     expect(events.retired.map(r => r.token)).toEqual([t1a, t2]);
@@ -188,6 +191,9 @@ describe('ReactFiberBatchRegistry', () => {
       setUrgent(1);
     });
     assertLog(['u=1 v=0', 'u=1 v=1']);
+    // Urgent tokens carry a 0 deferred bit; transition tokens a 1.
+    expect(urgentToken & 1).toBe(0);
+    expect(token & 1).toBe(1);
     // No pass includes both batches; the urgent pass excludes the pending
     // transition, and the transition's own pass includes it.
     const mixed = events.passes.filter(
@@ -216,7 +222,7 @@ describe('ReactFiberBatchRegistry', () => {
     });
     // Let the event's scheduling microtask (the close edge) run.
     await act(() => {});
-    expect(token.deferred).toBe(true);
+    expect(token & 1).toBe(1);
     expect(events.retired.map(r => r.token)).not.toContain(token);
 
     resolveGate();

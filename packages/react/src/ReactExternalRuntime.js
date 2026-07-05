@@ -38,9 +38,12 @@
  * - This module is isomorphic; renderers register a provider (and call the
  *   emit* methods) through ReactSharedInternals.E, following the same pattern
  *   as ReactSharedInternals.S (onStartTransitionFinish).
- * - Batches cross this boundary as opaque tokens (see
- *   ReactFiberBatchRegistry): stable identities to compare, meaningless to
- *   inspect. Roots are identified by their container (for react-dom, the DOM
+ * - Batches cross this boundary as integer tokens (see
+ *   ReactFiberBatchRegistry): non-zero integers, stable for the batch's
+ *   life, never reused while live. 0 is reserved for "no batch". The low
+ *   bit is the only documented payload: `token & 1` is 1 for deferred
+ *   (transition-like) batches. Everything else about a token is opaque.
+ *   Roots are identified by their container (for react-dom, the DOM
  *   container element) — an identity token that is also what a
  *   MutationObserver caller needs.
  * - Everything here is inert until the first listener subscribes; the
@@ -57,7 +60,7 @@ export type ExternalRuntimeListener = {
    * restarting. */
   onRenderPassStart?: (
     container: mixed,
-    includedBatches: $ReadOnlyArray<mixed>,
+    includedBatches: $ReadOnlyArray<number>,
   ) => void,
   /** The render pass on `container` completed or was discarded. */
   onRenderPassEnd?: (container: mixed) => void,
@@ -70,7 +73,7 @@ export type ExternalRuntimeListener = {
    * batches that never produced React work (their writes were external-only);
    * batches whose React updates were discarded by unmounts still retire
    * through an ordinary (empty) commit with committed = true. */
-  onBatchRetired?: (token: mixed, committed: boolean) => void,
+  onBatchRetired?: (token: number, committed: boolean) => void,
 };
 
 export type ExternalRuntimeProvider = {
@@ -79,10 +82,10 @@ export type ExternalRuntimeProvider = {
   /** Would a write issued right now belong to a deferred (transition-like)
    * batch? Pure classification: no token minting, no side effects. */
   isCurrentWriteDeferred: () => boolean,
-  /** Identity of the batch an external write issued right now belongs to.
-   * The returned token is stable for the batch's life and carries a
-   * `deferred` flag; the call allocates only on the batch's first use. */
-  getCurrentWriteBatch: () => mixed,
+  /** Identity of the batch an external write issued right now belongs to:
+   * a non-zero integer, stable for the batch's life, with the deferred
+   * classification in its low bit (`token & 1`). Never allocates. */
+  getCurrentWriteBatch: () => number,
 };
 
 const listeners: Set<ExternalRuntimeListener> = new Set();
@@ -107,12 +110,12 @@ export type ExternalRuntime = {
   hasListeners: boolean,
   emitRenderPassStart: (
     container: mixed,
-    includedBatches: $ReadOnlyArray<mixed>,
+    includedBatches: $ReadOnlyArray<number>,
   ) => void,
   emitRenderPassEnd: (container: mixed) => void,
   emitBeforeMutation: (container: mixed) => void,
   emitAfterMutation: (container: mixed) => void,
-  emitBatchRetired: (token: mixed, committed: boolean) => void,
+  emitBatchRetired: (token: number, committed: boolean) => void,
 };
 
 const runtime: ExternalRuntime = {
@@ -168,7 +171,9 @@ export function externalRuntimeIsCurrentWriteDeferred(): boolean {
   return providers.length > 0 ? providers[0].isCurrentWriteDeferred() : false;
 }
 
-export function getExternalRuntimeCurrentWriteBatch(): mixed {
+export function getExternalRuntimeCurrentWriteBatch(): number {
   const providers = runtime.providers;
-  return providers.length > 0 ? providers[0].getCurrentWriteBatch() : null;
+  // 0 = "no batch": no renderer has registered a provider (e.g. no renderer
+  // module has loaded yet), so a write issued now precedes any React batch.
+  return providers.length > 0 ? providers[0].getCurrentWriteBatch() : 0;
 }

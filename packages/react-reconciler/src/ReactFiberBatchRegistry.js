@@ -48,13 +48,19 @@ import {
  * finish edges on slots without tokens are integer/null checks.
  */
 
-export type BatchToken = {
-  /** True for transition-like batches: renders don't block paint and the
-   * batch commits later. External stores fork pending state on these. */
-  deferred: boolean,
-  /** Debug only; stable across the token's life. */
-  id: number,
-};
+/**
+ * A batch token is a non-zero integer: `serial << 1 | deferredBit`, written
+ * as `serial * 2 + deferredBit` so the serial is never truncated to 31 bits.
+ * 0 is reserved for "no batch" (see getExternalRuntimeCurrentWriteBatch).
+ *
+ *   token & 1              — 1 for transition-like (deferred) batches:
+ *                            renders don't block paint and the batch commits
+ *                            later. External stores fork pending state on
+ *                            these.
+ *   (token - (token & 1))/2 — the mint serial (debug only; stable for the
+ *                            token's life, never reused while live).
+ */
+export type BatchToken = number;
 
 type Slot = {
   token: BatchToken | null,
@@ -71,7 +77,7 @@ type Slot = {
 
 // One slot per lane index (31 lanes).
 const slots: Array<Slot | null> = new Array<Slot | null>(31).fill(null);
-let nextTokenId = 1;
+let nextTokenSerial = 1;
 
 function slotFor(lane: Lane): Slot {
   const index = 31 - Math.clz32(lane);
@@ -91,7 +97,7 @@ function slotFor(lane: Lane): Slot {
 export function getOrMintBatchToken(lane: Lane, isDeferred: boolean): BatchToken {
   const slot = slotFor(lane);
   if (slot.token === null) {
-    slot.token = {deferred: isDeferred, id: nextTokenId++};
+    slot.token = nextTokenSerial++ * 2 + (isDeferred ? 1 : 0);
   }
   return slot.token;
 }
@@ -211,7 +217,7 @@ export function batchRegistryOnEventClosed(): void {
     ) {
       continue;
     }
-    if (slot.token.deferred && (1 << i) === actionLane) {
+    if ((slot.token & 1) === 1 && (1 << i) === actionLane) {
       const actionThenable = peekEntangledActionThenable();
       if (actionThenable !== null) {
         parkUntilActionSettles(slot, actionThenable);

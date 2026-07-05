@@ -901,10 +901,10 @@ registerExternalRuntimeProvider({
     const transition = requestCurrentTransition();
     return transition !== null && !(transition as any).gesture;
   },
-  // Batch identity for an external write happening right now. Mints the
-  // token lazily (per batch, never per write); returns the token itself so
-  // this call never allocates after the batch's first write.
-  getCurrentWriteBatch(): mixed {
+  // Batch identity for an external write happening right now: a non-zero
+  // integer token with the deferred classification in its low bit. Minted
+  // lazily (per batch, never per write); the call never allocates.
+  getCurrentWriteBatch(): number {
     let lane;
     let deferred = false;
     if (
