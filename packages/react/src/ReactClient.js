@@ -69,7 +69,6 @@ import {
   externalRuntimeIsCurrentWriteDeferred,
   getExternalRuntimeCurrentWriteBatch,
   getExternalRuntimeRenderContext,
-  externalRuntimeProtocol,
   externalRuntimeDiscardAllWip,
   externalRuntimeRunInBatch,
 } from './ReactExternalRuntime';
@@ -133,7 +132,6 @@ export {
   getExternalRuntimeCurrentWriteBatch as unstable_getCurrentWriteBatch,
   externalRuntimeIsCurrentWriteDeferred as unstable_isCurrentWriteDeferred,
   getExternalRuntimeRenderContext as unstable_getRenderContext,
-  externalRuntimeProtocol as unstable_externalRuntimeProtocol,
   externalRuntimeDiscardAllWip as unstable_discardAllWip,
   externalRuntimeRunInBatch as unstable_runInBatch,
   // enableScopeAPI

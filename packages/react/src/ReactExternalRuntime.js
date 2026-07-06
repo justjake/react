@@ -57,76 +57,6 @@
 import ReactSharedInternals from './ReactSharedInternalsClient';
 import reportGlobalError from 'shared/reportGlobalError';
 
-// ── Protocol handshake (cosignal spec §4.1 fact 7) ──────────────────────────
-//
-// The protocol is versioned, with capability bits, on BOTH sides of the
-// channel: this isomorphic module carries the version the `react` package was
-// built with, and every renderer echoes the version its reconciler was built
-// with when it registers a provider (see ReactFiberExternalRuntime.js, which
-// keeps a deliberately duplicated copy of these constants). Consumers assert
-// both sides through `unstable_externalRuntimeProtocol` and refuse to run
-// otherwise. Version skew fails loudly — at provider registration for a
-// mismatched renderer, at the consumer handshake for everything else. There
-// is intentionally no silently-degraded mode: with a mismatched pair, writes
-// would classify as "no batch" and external stores would tear.
-//
-// Capability bits (grow-only; renumbering is a version bump):
-//   1 << 0  batch tokens        — integer write-classification tokens,
-//                                 mint/classify/retire (fact 1)
-//   1 << 1  pass lifecycle      — render-pass start/end events (fact 2, the
-//                                 start/end half)
-//   1 << 2  retirement          — exactly-once retirement with committed
-//                                 flag and async-action parking (fact 3)
-//   1 << 3  mutation window     — before/after host-mutation bracket
-//                                 (fact 6)
-//   1 << 4  pass yield/resume edges + end disposition (fact 2, the frame
-//           half): onRenderPassYield/onRenderPassResume around
-//           time-slicing gaps, and the pass frame closing at the
-//           commit/discard edge — onRenderPassEnd carries the
-//           disposition and fires at the commit (before that commit's
-//           onRootCommitted) or at the discard, NOT at render completion
-//   1 << 5  per-root commit reporting + baseline-capture ordering:
-//           onRootCommitted fires on every commit with the root's delta
-//           and generation, and each commit is ordered — the committed-
-//           side entry (end(commit)) precedes the table update
-//           (onRootCommitted) precedes the folds it causes
-//           (onBatchRetired) precedes the host-mutation window precedes
-//           layout effects (spec §4.2, fork test 26): a consumer
-//           snapshotting at end(commit) captures the pre-commit state
-//   1 << 6  runInBatch — unstable_runInBatch(token, fn) runs fn so the
-//           React updates it schedules join the token's batch: its own
-//           lane for a live batch (pinned transition for deferred tokens,
-//           the minting event priority for urgent ones), with the
-//           documented urgent fallback once the token has retired
-//   1 << 7  render lineage ids — onRenderPassStart delivers a lineage id
-//           that is stable per (root × batch-set) across restarts,
-//           replays, and Suspense retries, and dead once the set commits
-//           on that root or its work is abandoned. Suspense thenable
-//           capsules key on it
-//   1 << 8  discardAllWip — unstable_discardAllWip synchronously abandons
-//           every work-in-progress pass on every root: each open frame
-//           closes with the discard disposition before the call returns,
-//           and React re-schedules the abandoned lanes as fresh passes
-// Every planned v1 bit is implemented; new capabilities append new bits (a
-// stale build lacking one fails the consumer handshake instead of silently
-// missing events).
-export const EXTERNAL_RUNTIME_PROTOCOL_VERSION = 1;
-export const EXTERNAL_RUNTIME_CAPABILITIES =
-  (1 << 0) |
-  (1 << 1) |
-  (1 << 2) |
-  (1 << 3) |
-  (1 << 4) |
-  (1 << 5) |
-  (1 << 6) |
-  (1 << 7) |
-  (1 << 8);
-
-export type ExternalRuntimeProtocol = {
-  version: number,
-  capabilities: number,
-};
-
 export type ExternalRuntimeListener = {
   /** A render pass began on `container`, opening its pass FRAME.
    * `includedBatches` are the tokens of every live batch this pass renders
@@ -224,13 +154,6 @@ export type ExternalRuntimeProviderMethods = {
   runInBatch: <R>(token: number, fn: () => R) => R,
 };
 
-export type ExternalRuntimeProvider = {
-  /** The protocol version + capability bits the registering renderer was
-   * built with (its side of the handshake). */
-  protocol: ExternalRuntimeProtocol,
-  ...ExternalRuntimeProviderMethods,
-};
-
 const listeners: Set<ExternalRuntimeListener> = new Set();
 
 function emit(event: string, a: mixed, b?: mixed, c?: mixed): void {
@@ -250,11 +173,7 @@ function emit(event: string, a: mixed, b?: mixed, c?: mixed): void {
 }
 
 export type ExternalRuntime = {
-  /** This (isomorphic) side of the versioned handshake. Renderers check it
-   * before registering a provider and refuse to register across a version
-   * mismatch. */
-  protocol: ExternalRuntimeProtocol,
-  providers: Array<ExternalRuntimeProvider>,
+  providers: Array<ExternalRuntimeProviderMethods>,
   hasListeners: boolean,
   emitRenderPassStart: (
     container: mixed,
@@ -275,10 +194,6 @@ export type ExternalRuntime = {
 };
 
 const runtime: ExternalRuntime = {
-  protocol: {
-    version: EXTERNAL_RUNTIME_PROTOCOL_VERSION,
-    capabilities: EXTERNAL_RUNTIME_CAPABILITIES,
-  },
   providers: [],
   hasListeners: false,
   emitRenderPassStart(container, includedBatches, lineageId) {
@@ -308,33 +223,6 @@ const runtime: ExternalRuntime = {
 };
 
 ReactSharedInternals.E = runtime;
-
-/**
- * The consumer side of the handshake: everything a binding needs to refuse a
- * degraded configuration before doing any work.
- *
- * A binding must assert, in order, and throw its own error if any fails:
- *   1. this export exists (stock React has none),
- *   2. `version` is the version it was written against,
- *   3. `capabilities` contains every bit it requires,
- *   4. after loading its renderer: `providerProtocols` contains an entry
- *      whose version/capabilities pass the same checks (a renderer that is
- *      missing entirely means a stock or mismatched renderer package —
- *      registration of a MISMATCHED renderer already failed loudly at
- *      renderer load, so an empty list here means no renderer loaded at all).
- */
-export const externalRuntimeProtocol: {
-  version: number,
-  capabilities: number,
-  providerProtocols: Array<ExternalRuntimeProtocol>,
-} = {
-  version: EXTERNAL_RUNTIME_PROTOCOL_VERSION,
-  capabilities: EXTERNAL_RUNTIME_CAPABILITIES,
-  // $FlowFixMe[unsafe-getters-setters] live view of registered renderers
-  get providerProtocols(): Array<ExternalRuntimeProtocol> {
-    return runtime.providers.map(provider => provider.protocol);
-  },
-};
 
 export function subscribeToExternalRuntime(
   listener: ExternalRuntimeListener,
