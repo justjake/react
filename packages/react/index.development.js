@@ -56,7 +56,6 @@ export {
   unstable_useCacheRefresh,
   unstable_subscribeToExternalRuntime,
   unstable_getCurrentWriteBatch,
-  unstable_isCurrentWriteDeferred,
   unstable_getRenderContext,
   unstable_discardAllWip,
   unstable_runInBatch,

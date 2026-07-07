@@ -66,7 +66,6 @@ import {captureOwnerStack} from './ReactOwnerStack';
 import * as ReactCompilerRuntime from './ReactCompilerRuntime';
 import {
   subscribeToExternalRuntime,
-  externalRuntimeIsCurrentWriteDeferred,
   getExternalRuntimeCurrentWriteBatch,
   getExternalRuntimeRenderContext,
   externalRuntimeDiscardAllWip,
@@ -130,7 +129,6 @@ export {
   // External-runtime introspection for external state libraries
   subscribeToExternalRuntime as unstable_subscribeToExternalRuntime,
   getExternalRuntimeCurrentWriteBatch as unstable_getCurrentWriteBatch,
-  externalRuntimeIsCurrentWriteDeferred as unstable_isCurrentWriteDeferred,
   getExternalRuntimeRenderContext as unstable_getRenderContext,
   externalRuntimeDiscardAllWip as unstable_discardAllWip,
   externalRuntimeRunInBatch as unstable_runInBatch,

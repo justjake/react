@@ -18,7 +18,6 @@ import ReactSharedInternals from 'shared/ReactSharedInternals';
 import {
   batchTokensForRender,
   batchRegistryOnRenderStart,
-  lineageForRender,
 } from './ReactFiberBatchRegistry';
 
 /**
@@ -43,8 +42,8 @@ export function registerExternalRuntimeProvider(
   methods: ExternalRuntimeProviderMethods,
 ): void {
   const runtime = getExternalRuntime();
-  if (runtime !== null) {
-    runtime.providers.push(methods);
+  if (runtime !== null && runtime.provider === null) {
+    runtime.provider = methods;
   }
 }
 
@@ -111,11 +110,9 @@ export function notifyRenderPassStart(root: FiberRoot, lanes: Lanes): void {
     batchRegistryOnRenderStart(root, lanes);
     rootsWithActivePass.add(root);
     if (runtime.hasListeners) {
-      const includedBatches = batchTokensForRender(root, lanes);
       runtime.emitRenderPassStart(
         root.containerInfo,
-        includedBatches,
-        lineageForRender(root, lanes, includedBatches),
+        batchTokensForRender(root, lanes),
       );
     }
   }

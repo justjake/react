@@ -17,10 +17,9 @@
  * cannot otherwise observe:
  *
  *   1. the identity of the batch a write issued *right now* belongs to
- *      (getCurrentWriteBatch, with isCurrentWriteDeferred as its
- *      allocation-free classification), so an external write can be
- *      attributed to the same "version of the world" as the setState calls
- *      it batches with;
+ *      (getCurrentWriteBatch, with the deferred classification in the
+ *      token's low bit), so an external write can be attributed to the
+ *      same "version of the world" as the setState calls it batches with;
  *   2. which root is currently rendering and which batches that pass
  *      includes (getRenderContext and the render-pass listener events), so
  *      reads during render can resolve against the matching version;
@@ -67,24 +66,10 @@ export type ExternalRuntimeListener = {
    * callstack, NOT per frame: code running in a yield gap or while a
    * completed tree waits to commit observes getRenderContext() === null even
    * though the frame is open — keying any decision to the wall-clock
-   * [start, end) interval is wrong.
-   *
-   * `lineageId` is the render-lineage identity: a positive integer stable
-   * per (root × batch-set). Every pass on this root rendering the same set
-   * of batches — restarts after an interruption, replays, Suspense retries,
-   * fresh passes after discardAllWip — reports the SAME id, and the id is
-   * dead (never reported again) once the set commits on this root or its
-   * work is abandoned. A pass over a different set (a restart that picked
-   * up an extra batch, a pass after a spanning batch locked in) reports a
-   * new id, and the same batch-set spanning two roots has a different id
-   * per root. Single tokens, mask unions, and pass serial numbers are all
-   * wrong keys for cross-pass state (they drift, churn, or refetch
-   * forever); this id is the intended key, e.g. for Suspense thenable
-   * capsules. */
+   * [start, end) interval is wrong. */
   onRenderPassStart?: (
     container: mixed,
     includedBatches: $ReadOnlyArray<number>,
-    lineageId: number,
   ) => void,
   /** The pass on `container` yielded to the event loop with its tree
    * unfinished; the frame stays open. Fires at most once per gap:
@@ -134,9 +119,6 @@ export type ExternalRuntimeListener = {
 export type ExternalRuntimeProviderMethods = {
   /** Non-null while a render pass is executing on the current thread. */
   getRenderContext: () => null | {container: mixed},
-  /** Would a write issued right now belong to a deferred (transition-like)
-   * batch? Pure classification: no token minting, no side effects. */
-  isCurrentWriteDeferred: () => boolean,
   /** Identity of the batch an external write issued right now belongs to:
    * a non-zero integer, stable for the batch's life, with the deferred
    * classification in its low bit (`token & 1`). Never allocates. */
@@ -173,12 +155,15 @@ function emit(event: string, a: mixed, b?: mixed, c?: mixed): void {
 }
 
 export type ExternalRuntime = {
-  providers: Array<ExternalRuntimeProviderMethods>,
+  /** The one registered renderer provider. One renderer per runtime: only
+   * one renderer can be processing an event / rendering at a time on a
+   * thread, and the workspace never loads two. A second renderer's
+   * registration is ignored (first wins). */
+  provider: ExternalRuntimeProviderMethods | null,
   hasListeners: boolean,
   emitRenderPassStart: (
     container: mixed,
     includedBatches: $ReadOnlyArray<number>,
-    lineageId: number,
   ) => void,
   emitRenderPassYield: (container: mixed) => void,
   emitRenderPassResume: (container: mixed) => void,
@@ -194,10 +179,10 @@ export type ExternalRuntime = {
 };
 
 const runtime: ExternalRuntime = {
-  providers: [],
+  provider: null,
   hasListeners: false,
-  emitRenderPassStart(container, includedBatches, lineageId) {
-    emit('onRenderPassStart', container, includedBatches, lineageId);
+  emitRenderPassStart(container, includedBatches) {
+    emit('onRenderPassStart', container, includedBatches);
   },
   emitRenderPassYield(container) {
     emit('onRenderPassYield', container);
@@ -236,52 +221,31 @@ export function subscribeToExternalRuntime(
 }
 
 export function getExternalRuntimeRenderContext(): null | {container: mixed} {
-  const providers = runtime.providers;
-  for (let i = 0; i < providers.length; i++) {
-    const context = providers[i].getRenderContext();
-    if (context !== null) {
-      return context;
-    }
-  }
-  return null;
-}
-
-// Only one renderer can be processing an event / rendering at a time on a
-// thread; the first registered provider answers. With multiple renderers
-// loaded, batch attribution is best-effort (documented limitation).
-
-export function externalRuntimeIsCurrentWriteDeferred(): boolean {
-  const providers = runtime.providers;
-  return providers.length > 0 ? providers[0].isCurrentWriteDeferred() : false;
+  const provider = runtime.provider;
+  return provider !== null ? provider.getRenderContext() : null;
 }
 
 export function getExternalRuntimeCurrentWriteBatch(): number {
-  const providers = runtime.providers;
+  const provider = runtime.provider;
   // 0 = "no batch": no renderer has registered a provider (e.g. no renderer
   // module has loaded yet), so a write issued now precedes any React batch.
-  return providers.length > 0 ? providers[0].getCurrentWriteBatch() : 0;
+  return provider !== null ? provider.getCurrentWriteBatch() : 0;
 }
 
 export function externalRuntimeDiscardAllWip(): void {
-  // Unlike the write-classification reads above, this addresses every
-  // renderer: each one abandons its own work in progress.
-  const providers = runtime.providers;
-  for (let i = 0; i < providers.length; i++) {
-    providers[i].discardAllWip();
+  const provider = runtime.provider;
+  if (provider !== null) {
+    provider.discardAllWip();
   }
 }
 
 export function externalRuntimeRunInBatch<R>(token: number, fn: () => R): R {
-  const providers = runtime.providers;
-  if (providers.length === 0) {
+  const provider = runtime.provider;
+  if (provider === null) {
     // No renderer has registered a provider, so no batch can be live and
     // there is no renderer scheduling state to pin: this is the retired-
     // token fallback with nothing to make urgent. Run fn plainly.
     return fn();
   }
-  // Tokens are minted by a renderer's reconciler; with several renderers
-  // loaded, attribution is best-effort through the first (the documented
-  // multi-renderer limitation above). A token the first renderer does not
-  // recognize takes its retired-token urgent fallback.
-  return providers[0].runInBatch(token, fn);
+  return provider.runInBatch(token, fn);
 }

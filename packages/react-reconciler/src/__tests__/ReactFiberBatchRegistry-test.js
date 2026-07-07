@@ -86,21 +86,6 @@ describe('ReactFiberBatchRegistry', () => {
     unsubscribe();
   });
 
-  it('classifies writes without minting: isCurrentWriteDeferred causes no retirement', async () => {
-    const {events, unsubscribe} = subscribe();
-    let deferredInside = null;
-    await act(() => {
-      expect(React.unstable_isCurrentWriteDeferred()).toBe(false);
-      startTransition(() => {
-        deferredInside = React.unstable_isCurrentWriteDeferred();
-      });
-    });
-    expect(deferredInside).toBe(true);
-    // Classification alone mints nothing, so there is nothing to retire.
-    expect(events.retired).toEqual([]);
-    unsubscribe();
-  });
-
   it('a transition that renders and commits retires exactly once, committed', async () => {
     const {events, unsubscribe} = subscribe();
     let setValue;
@@ -231,7 +216,6 @@ describe('ReactFiberBatchRegistry', () => {
     await act(() => {
       ReactNoop.discreteUpdates(() => {
         discreteToken = React.unstable_getCurrentWriteBatch();
-        expect(React.unstable_isCurrentWriteDeferred()).toBe(false);
         setValue(1);
       });
       // The same event, outside the discrete handler: the ambient default
@@ -254,13 +238,10 @@ describe('ReactFiberBatchRegistry', () => {
   it('classifies timer/network (ambient) writes as the default batch', async () => {
     const {events, unsubscribe} = subscribe();
     let ambientToken = null;
-    let deferred = null;
     await act(() => {
       // act's callback runs like a timer callback: no event, no transition.
       ambientToken = React.unstable_getCurrentWriteBatch();
-      deferred = React.unstable_isCurrentWriteDeferred();
     });
-    expect(deferred).toBe(false);
     expect(ambientToken & 1).toBe(0);
     // Store-only ambient batch: retires uncommitted at its close edge.
     expect(events.retired).toEqual([{token: ambientToken, committed: false}]);
@@ -286,7 +267,6 @@ describe('ReactFiberBatchRegistry', () => {
     let token = null;
     ReactNoop.flushSync(() => {
       token = React.unstable_getCurrentWriteBatch();
-      expect(React.unstable_isCurrentWriteDeferred()).toBe(false);
       setValue(1);
     });
     // Committed synchronously: the log is already there, no act needed.
@@ -310,13 +290,10 @@ describe('ReactFiberBatchRegistry', () => {
         probes.handlerBefore = React.unstable_getCurrentWriteBatch();
         startTransition(() => {
           probes.transitionInHandler = React.unstable_getCurrentWriteBatch();
-          probes.transitionInHandlerDeferred =
-            React.unstable_isCurrentWriteDeferred();
         });
         probes.handlerAfter = React.unstable_getCurrentWriteBatch();
       });
     });
-    expect(probes.transitionInHandlerDeferred).toBe(true);
     expect(probes.transitionInHandler & 1).toBe(1);
     expect(probes.handlerBefore & 1).toBe(0);
     // The handler's own classification is untouched by the nested scope.
@@ -328,12 +305,10 @@ describe('ReactFiberBatchRegistry', () => {
         probes.scopeBefore = React.unstable_getCurrentWriteBatch();
         ReactNoop.discreteUpdates(() => {
           probes.eventInScope = React.unstable_getCurrentWriteBatch();
-          probes.eventInScopeDeferred = React.unstable_isCurrentWriteDeferred();
         });
         probes.scopeAfter = React.unstable_getCurrentWriteBatch();
       });
     });
-    expect(probes.eventInScopeDeferred).toBe(false);
     expect(probes.eventInScope & 1).toBe(0);
     expect(probes.scopeBefore & 1).toBe(1);
     expect(probes.scopeAfter).toBe(probes.scopeBefore);
@@ -411,13 +386,11 @@ describe('ReactFiberBatchRegistry', () => {
     });
     let tokenBefore = null;
     let bareToken = null;
-    let bareDeferred = null;
     let rewrapToken = null;
     startTransition(async () => {
       tokenBefore = React.unstable_getCurrentWriteBatch();
       await gate;
       // The bare continuation: no transition scope survives an await.
-      bareDeferred = React.unstable_isCurrentWriteDeferred();
       bareToken = React.unstable_getCurrentWriteBatch();
       // The re-wrapped continuation: a fresh startTransition while the
       // action scope is still pending.
@@ -436,7 +409,6 @@ describe('ReactFiberBatchRegistry', () => {
     expect(rewrapToken).toBe(tokenBefore);
     // The bare continuation was ambient: urgent classification, a distinct
     // default-lane token.
-    expect(bareDeferred).toBe(false);
     expect(bareToken & 1).toBe(0);
     expect(bareToken).not.toBe(tokenBefore);
     // Still store-only when the action settled: retired exactly once,

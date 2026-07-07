@@ -891,21 +891,6 @@ registerExternalRuntimeProvider({
     }
     return null;
   },
-  // Classification only — no token minting, no side effects. Lets external
-  // stores apply their observability gate BEFORE asking for a token, so a
-  // plain immediate write that needs no bookkeeping allocates nothing at all.
-  isCurrentWriteDeferred(): boolean {
-    if (
-      (executionContext & RenderContext) !== NoContext &&
-      workInProgressRootRenderLanes !== NoLanes
-    ) {
-      return laneIsTransitionLane(
-        pickArbitraryLane(workInProgressRootRenderLanes) as any,
-      );
-    }
-    const transition = requestCurrentTransition();
-    return transition !== null && !(transition as any).gesture;
-  },
   // Batch identity for an external write happening right now: a non-zero
   // integer token with the deferred classification in its low bit. Minted
   // lazily (per batch, never per write); the call never allocates.

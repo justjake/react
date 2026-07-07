@@ -251,7 +251,7 @@ describe('ReactFiberRunInBatch', () => {
       // The delivery. Classification inside the callback resolves to the
       // batch itself.
       React.unstable_runInBatch(t, () => {
-        insideDeferred = React.unstable_isCurrentWriteDeferred();
+        insideDeferred = (React.unstable_getCurrentWriteBatch() & 1) === 1;
         insideToken = React.unstable_getCurrentWriteBatch();
         setEntangled(1);
       });
@@ -453,15 +453,15 @@ describe('ReactFiberRunInBatch', () => {
 
       React.unstable_runInBatch(t, () => {
         probes.outerToken = React.unstable_getCurrentWriteBatch();
-        probes.outerDeferred = React.unstable_isCurrentWriteDeferred();
+        probes.outerDeferred = (React.unstable_getCurrentWriteBatch() & 1) === 1;
         React.unstable_runInBatch(u, () => {
           probes.innerToken = React.unstable_getCurrentWriteBatch();
-          probes.innerDeferred = React.unstable_isCurrentWriteDeferred();
+          probes.innerDeferred = (React.unstable_getCurrentWriteBatch() & 1) === 1;
           setUrgent(1);
         });
         // The outer deferred pin is restored after the inner call returns.
         probes.restoredToken = React.unstable_getCurrentWriteBatch();
-        probes.restoredDeferred = React.unstable_isCurrentWriteDeferred();
+        probes.restoredDeferred = (React.unstable_getCurrentWriteBatch() & 1) === 1;
       });
     });
     // The urgent (default-priority) write commits in its own earlier flush;
@@ -526,7 +526,7 @@ describe('ReactFiberRunInBatch', () => {
     let fallbackDeferred = null;
     await act(() => {
       React.unstable_runInBatch(t, () => {
-        fallbackDeferred = React.unstable_isCurrentWriteDeferred();
+        fallbackDeferred = (React.unstable_getCurrentWriteBatch() & 1) === 1;
         fallbackToken = React.unstable_getCurrentWriteBatch();
         setValue(1);
       });
@@ -756,7 +756,7 @@ describe('ReactFiberRunInBatch', () => {
           probes.delivered = true;
           React.unstable_runInBatch(t, () => {
             probes.insideToken = React.unstable_getCurrentWriteBatch();
-            probes.insideDeferred = React.unstable_isCurrentWriteDeferred();
+            probes.insideDeferred = (React.unstable_getCurrentWriteBatch() & 1) === 1;
             setLate(1);
           });
         }

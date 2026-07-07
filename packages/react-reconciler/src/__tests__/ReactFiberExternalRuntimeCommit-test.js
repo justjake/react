@@ -717,7 +717,7 @@ describe('ReactFiberExternalRuntimeCommit', () => {
     const mirror = {generation: 0, retiredCount: 0};
     let containerOfInterest = null;
     const unsubscribe = React.unstable_subscribeToExternalRuntime({
-      onRenderPassStart(container, includedBatches, lineageId) {
+      onRenderPassStart(container, includedBatches) {
         log.push({
           type: 'passStart',
           container,
