@@ -17,18 +17,28 @@
  * cannot otherwise observe:
  *
  *   1. the identity of the batch a write issued *right now* belongs to
- *      (getCurrentWriteBatch, with the deferred classification in the
- *      token's low bit), so an external write can be attributed to the
- *      same "version of the world" as the setState calls it batches with;
+ *      (getCurrentWriteBatch), so an external write can be attributed to
+ *      the same "version of the world" as the setState calls it batches
+ *      with;
  *   2. which root is currently rendering and which batches that pass
  *      includes (getRenderContext and the render-pass listener events), so
  *      reads during render can resolve against the matching version;
- *   3. when each batch retires (onBatchRetired, exactly once per token), so
+ *   3. when each batch retires (onBatchRetired, exactly once per batch), so
  *      pending versions can be promoted to committed state — and, because a
  *      batch spanning several roots commits on each root at its own time,
  *      when each root commits (onRootCommitted, with the batches that commit
  *      made visible on that root), so per-root committed views stay
  *      self-consistent while the batch is still pending elsewhere.
+ *
+ * Batch ids are allocated by the external store itself when it registers a
+ * BATCH-ID ALLOCATOR (registerBatchIdAllocator below): at each batch's
+ * creation the reconciler calls the allocator with the batch's deferred
+ * classification and stores whatever id it returns, so React's batch ids
+ * and the store's batch ids are ONE number space — no translation tables on
+ * either side, and allocation is also where the store learns each batch's
+ * deferredness. Without a registered allocator the reconciler numbers
+ * batches from its own internal counter; the protocol is identical either
+ * way.
  *
  * Separately, onBeforeMutation/onAfterMutation bracket exactly the window in
  * which React mutates the DOM during a commit, so a MutationObserver can
@@ -41,14 +51,14 @@
  * - This module is isomorphic; renderers register a provider (and call the
  *   emit* methods) through ReactSharedInternals.E, following the same pattern
  *   as ReactSharedInternals.S (onStartTransitionFinish).
- * - Batches cross this boundary as integer tokens (see
- *   ReactFiberBatchRegistry): non-zero integers, stable for the batch's
- *   life, never reused while live. 0 is reserved for "no batch". The low
- *   bit is the only documented payload: `token & 1` is 1 for deferred
- *   (transition-like) batches. Everything else about a token is opaque.
- *   Roots are identified by their container (for react-dom, the DOM
- *   container element) — an identity token that is also what a
- *   MutationObserver caller needs.
+ * - Batches cross this boundary as integer batch ids (see
+ *   ReactFiberBatchRegistry): positive integers, stable for the batch's
+ *   life, never reused while live. BATCH_NONE (0) is reserved for "no
+ *   batch". The integer carries no payload — deferredness is told to the
+ *   registered allocator at creation, not encoded in the id — and is
+ *   otherwise opaque. Roots are identified by their container (for
+ *   react-dom, the DOM container element) — an identity token that is also
+ *   what a MutationObserver caller needs.
  * - Everything here is inert until the first listener subscribes; the
  *   per-commit cost with no listeners is one property read and branch.
  */
@@ -56,9 +66,28 @@
 import ReactSharedInternals from './ReactSharedInternalsClient';
 import reportGlobalError from 'shared/reportGlobalError';
 
+/** The reserved "no batch" id (mirrored by ReactFiberBatchRegistry's
+ * BATCH_NONE — the two modules cannot share a constant across the
+ * isomorphic/reconciler boundary). */
+const BATCH_NONE = 0;
+
+/**
+ * An external store's batch-id allocator. Called by the reconciler exactly
+ * once per batch, at the batch's creation — the first time an external
+ * write asks for the current batch on a lane with no live batch — with the
+ * batch's deferred classification (true for transition-like batches whose
+ * renders don't block paint). Must return a positive integer that no live
+ * batch currently carries; the reconciler stores it as the batch's identity
+ * for its whole life (every event and provider method speaks it). Creation
+ * can happen mid-render, mid-commit, or inside protocol listeners, so the
+ * allocator must be allocation-only on its own side: hand out the id,
+ * record what it needs, run nothing else.
+ */
+export type BatchIdAllocator = (deferred: boolean) => number;
+
 export type ExternalRuntimeListener = {
   /** A render pass began on `container`, opening its pass FRAME.
-   * `includedBatches` are the tokens of every live batch this pass renders
+   * `includedBatches` are the ids of every live batch this pass renders
    * (see getCurrentWriteBatch). The frame stays open across yields
    * (onRenderPassYield/onRenderPassResume) and across the
    * completed-but-uncommitted period (e.g. a commit suspended on resources),
@@ -93,21 +122,21 @@ export type ExternalRuntimeListener = {
   onBeforeMutation?: (container: mixed) => void,
   /** React finished mutating the host tree under `container`. */
   onAfterMutation?: (container: mixed) => void,
-  /** A batch retired — exactly once per token. `committed` is false only for
-   * batches that never produced React work (their writes were external-only);
-   * batches whose React updates were discarded by unmounts still retire
-   * through an ordinary (empty) commit with committed = true. */
-  onBatchRetired?: (token: number, committed: boolean) => void,
+  /** A batch retired — exactly once per batch id. `committed` is false only
+   * for batches that never produced React work (their writes were
+   * external-only); batches whose React updates were discarded by unmounts
+   * still retire through an ordinary (empty) commit with committed = true. */
+  onBatchRetired?: (batchId: number, committed: boolean) => void,
   /** `container` committed. Fires on every commit of a root, in commit order.
    * `committedBatches` is the delta this commit adds to the root's
-   * committed-batch table: the tokens of live batches whose updates this
+   * committed-batch table: the ids of live batches whose updates this
    * commit made visible on this root, exactly once per (root, batch). A batch
    * still pending on a root (not rendered by the committing pass) never
    * appears, and neither does a batch whose updates on this root died with
    * deleted fibers (pruned): the table reflects what the root's committed
    * tree actually shows. `rootCommitGeneration` counts this root's commits
    * (monotonic, per root, starting at 1). Within one commit, this event
-   * precedes the onBatchRetired edges the commit causes: a token retires
+   * precedes the onBatchRetired edges the commit causes: a batch retires
    * BECAUSE its last pending root committed (or pruned) it. */
   onRootCommitted?: (
     container: mixed,
@@ -120,8 +149,9 @@ export type ExternalRuntimeProviderMethods = {
   /** Non-null while a render pass is executing on the current thread. */
   getRenderContext: () => null | {container: mixed},
   /** Identity of the batch an external write issued right now belongs to:
-   * a non-zero integer, stable for the batch's life, with the deferred
-   * classification in its low bit (`token & 1`). Never allocates. */
+   * a positive integer, stable for the batch's life. Creates the batch
+   * identity on first use for a batch (via the registered allocator, or the
+   * reconciler's fallback counter); allocation-free per write after that. */
   getCurrentWriteBatch: () => number,
   /** Synchronously abandon every work-in-progress pass on every root this
    * renderer manages: every open pass frame closes with the discard
@@ -129,11 +159,16 @@ export type ExternalRuntimeProviderMethods = {
    * re-scheduled as fresh passes. Throws if called while the renderer is
    * rendering or committing. */
   discardAllWip: () => void,
-  /** Run `fn` so the React updates it schedules join `token`'s batch (its
-   * own lane while the token is live; the urgent fallback once it has
+  /** Run `fn` so the React updates it schedules join `batchId`'s batch (its
+   * own lane while the batch is live; the urgent fallback once it has
    * retired). Returns fn's result. Throws if called while the renderer is
    * rendering. */
-  runInBatch: <R>(token: number, fn: () => R) => R,
+  runInBatch: <R>(batchId: number, fn: () => R) => R,
+  /** TEST-ONLY: clear the batch registry's full slot tenancy (batch ids,
+   * root sets, committed-root sets, parked state) without emitting
+   * retirement events. See resetBatchRegistryForTest in
+   * ReactFiberBatchRegistry. */
+  resetBatchRegistryForTest: () => void,
 };
 
 const listeners: Set<ExternalRuntimeListener> = new Set();
@@ -160,6 +195,11 @@ export type ExternalRuntime = {
    * thread, and the workspace never loads two. A second renderer's
    * registration is ignored (first wins). */
   provider: ExternalRuntimeProviderMethods | null,
+  /** The one registered batch-id allocator (see BatchIdAllocator), or null
+   * when no external store has registered one (the reconciler then numbers
+   * batches from its own counter). One allocator per runtime: batch ids are
+   * one number space, and two stores minting into it cannot compose. */
+  allocateBatchId: BatchIdAllocator | null,
   hasListeners: boolean,
   emitRenderPassStart: (
     container: mixed,
@@ -170,7 +210,7 @@ export type ExternalRuntime = {
   emitRenderPassEnd: (container: mixed, committed: boolean) => void,
   emitBeforeMutation: (container: mixed) => void,
   emitAfterMutation: (container: mixed) => void,
-  emitBatchRetired: (token: number, committed: boolean) => void,
+  emitBatchRetired: (batchId: number, committed: boolean) => void,
   emitRootCommitted: (
     container: mixed,
     committedBatches: $ReadOnlyArray<number>,
@@ -180,6 +220,7 @@ export type ExternalRuntime = {
 
 const runtime: ExternalRuntime = {
   provider: null,
+  allocateBatchId: null,
   hasListeners: false,
   emitRenderPassStart(container, includedBatches) {
     emit('onRenderPassStart', container, includedBatches);
@@ -199,8 +240,8 @@ const runtime: ExternalRuntime = {
   emitAfterMutation(container) {
     emit('onAfterMutation', container);
   },
-  emitBatchRetired(token, committed) {
-    emit('onBatchRetired', token, committed);
+  emitBatchRetired(batchId, committed) {
+    emit('onBatchRetired', batchId, committed);
   },
   emitRootCommitted(container, committedBatches, rootCommitGeneration) {
     emit('onRootCommitted', container, committedBatches, rootCommitGeneration);
@@ -220,6 +261,47 @@ export function subscribeToExternalRuntime(
   };
 }
 
+/**
+ * Registers the external store's batch-id allocator (see BatchIdAllocator);
+ * returns the unregister function. From registration on, every batch React
+ * creates carries an id the allocator handed out. Throws if an allocator is
+ * already registered: ids form one number space, so exactly one store can
+ * own allocation — a store replacing itself must unregister first (and only
+ * do so when no batch it allocated is still live, or between tests after
+ * resetting the registry).
+ */
+export function registerExternalRuntimeBatchIdAllocator(
+  allocateBatchId: BatchIdAllocator,
+): () => void {
+  if (runtime.allocateBatchId !== null) {
+    throw new Error(
+      'A batch-id allocator is already registered. Batch ids are one ' +
+        'number space, so only one external store can allocate them; ' +
+        'unregister the previous allocator first.',
+    );
+  }
+  runtime.allocateBatchId = allocateBatchId;
+  return function unregister() {
+    if (runtime.allocateBatchId === allocateBatchId) {
+      runtime.allocateBatchId = null;
+    }
+  };
+}
+
+/**
+ * TEST-ONLY. Clears the renderer's batch registry — the full tenancy of
+ * every batch slot (batch id, deferred flag, root sets, committed-root
+ * sets, parked state) — without emitting retirement events. Test harnesses
+ * call it between tests so stale slots never leak batch identity across a
+ * test boundary. No-op when no renderer has registered a provider.
+ */
+export function externalRuntimeResetBatchRegistryForTest(): void {
+  const provider = runtime.provider;
+  if (provider !== null) {
+    provider.resetBatchRegistryForTest();
+  }
+}
+
 export function getExternalRuntimeRenderContext(): null | {container: mixed} {
   const provider = runtime.provider;
   return provider !== null ? provider.getRenderContext() : null;
@@ -227,9 +309,10 @@ export function getExternalRuntimeRenderContext(): null | {container: mixed} {
 
 export function getExternalRuntimeCurrentWriteBatch(): number {
   const provider = runtime.provider;
-  // 0 = "no batch": no renderer has registered a provider (e.g. no renderer
-  // module has loaded yet), so a write issued now precedes any React batch.
-  return provider !== null ? provider.getCurrentWriteBatch() : 0;
+  // BATCH_NONE = "no batch": no renderer has registered a provider (e.g. no
+  // renderer module has loaded yet), so a write issued now precedes any
+  // React batch.
+  return provider !== null ? provider.getCurrentWriteBatch() : BATCH_NONE;
 }
 
 export function externalRuntimeDiscardAllWip(): void {
@@ -239,13 +322,13 @@ export function externalRuntimeDiscardAllWip(): void {
   }
 }
 
-export function externalRuntimeRunInBatch<R>(token: number, fn: () => R): R {
+export function externalRuntimeRunInBatch<R>(batchId: number, fn: () => R): R {
   const provider = runtime.provider;
   if (provider === null) {
     // No renderer has registered a provider, so no batch can be live and
     // there is no renderer scheduling state to pin: this is the retired-
-    // token fallback with nothing to make urgent. Run fn plainly.
+    // batch fallback with nothing to make urgent. Run fn plainly.
     return fn();
   }
-  return provider.runInBatch(token, fn);
+  return provider.runInBatch(batchId, fn);
 }

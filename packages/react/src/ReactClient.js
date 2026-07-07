@@ -66,10 +66,12 @@ import {captureOwnerStack} from './ReactOwnerStack';
 import * as ReactCompilerRuntime from './ReactCompilerRuntime';
 import {
   subscribeToExternalRuntime,
+  registerExternalRuntimeBatchIdAllocator,
   getExternalRuntimeCurrentWriteBatch,
   getExternalRuntimeRenderContext,
   externalRuntimeDiscardAllWip,
   externalRuntimeRunInBatch,
+  externalRuntimeResetBatchRegistryForTest,
 } from './ReactExternalRuntime';
 
 const Children = {
@@ -128,10 +130,12 @@ export {
   use,
   // External-runtime introspection for external state libraries
   subscribeToExternalRuntime as unstable_subscribeToExternalRuntime,
+  registerExternalRuntimeBatchIdAllocator as unstable_registerBatchIdAllocator,
   getExternalRuntimeCurrentWriteBatch as unstable_getCurrentWriteBatch,
   getExternalRuntimeRenderContext as unstable_getRenderContext,
   externalRuntimeDiscardAllWip as unstable_discardAllWip,
   externalRuntimeRunInBatch as unstable_runInBatch,
+  externalRuntimeResetBatchRegistryForTest as unstable_resetBatchRegistryForTest,
   // enableScopeAPI
   REACT_SCOPE_TYPE as unstable_Scope,
   // enableTransitionTracing

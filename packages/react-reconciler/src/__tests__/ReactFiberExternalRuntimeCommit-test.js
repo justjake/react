@@ -13,12 +13,12 @@
  * protocol (cosignal spec §4.1 fact 3, §4.4 tests 15–17 and 25): a batch
  * spanning several roots commits on each root at its own time, and each of
  * those commits is REPORTED per root — with a per-root commit generation —
- * while the token stays live until its last pending root finishes.
+ * while the batchId stays live until its last pending root finishes.
  *
  * These tests pin current React behavior through the channel; the multi-root
  * schedules here are the ones the spec calls out as never having had a
  * current-generation existence proof. See ReactFiberBatchRegistry-test.js for
- * the single-root token protocol and ReactFiberExternalRuntimePass-test.js
+ * the single-root batchId protocol and ReactFiberExternalRuntimePass-test.js
  * for the pass/commit serialization facts.
  */
 
@@ -77,19 +77,44 @@ describe('ReactFiberExternalRuntimeCommit', () => {
         const entry = {
           type: 'rootCommitted',
           container,
-          tokens: committedBatches.slice(),
+          batchIds: committedBatches.slice(),
           generation: rootCommitGeneration,
         };
         events.log.push(entry);
         events.commits.push(entry);
       },
-      onBatchRetired(token, committed) {
-        const entry = {type: 'retired', token, committed};
+      onBatchRetired(batchId, committed) {
+        const entry = {type: 'retired', batchId, committed};
         events.log.push(entry);
         events.retired.push(entry);
       },
     });
     return {events, unsubscribe};
+  }
+
+  // Registers a batch-id allocator standing in for an external store; the
+  // deferred classification of each batch is told to the allocator at
+  // creation — the protocol's one deferredness exposure.
+  function installAllocator() {
+    const allocated = new Map(); // batchId -> deferred
+    let nextId = 101;
+    const unregister = React.unstable_registerBatchIdAllocator(deferred => {
+      const batchId = nextId++;
+      allocated.set(batchId, deferred);
+      return batchId;
+    });
+    return {
+      allocated,
+      deferredOf(batchId) {
+        if (!allocated.has(batchId)) {
+          throw new Error(
+            `batch id ${batchId} was not allocated by this allocator`,
+          );
+        }
+        return allocated.get(batchId);
+      },
+      unregister,
+    };
   }
 
   function commitsOn(events, container) {
@@ -102,8 +127,8 @@ describe('ReactFiberExternalRuntimeCommit', () => {
 
   // Spec test 15: two createRoots, one transition spanning both; the batch's
   // commit on each root is reported per root, with that root's commit
-  // generation, while the token stays live until the last root finishes.
-  it('reports a spanning batch per root, with generations, while the token stays live', async () => {
+  // generation, while the batchId stays live until the last root finishes.
+  it('reports a spanning batch per root, with generations, while the batchId stays live', async () => {
     const {events, unsubscribe} = subscribe();
     let resolveGate;
     const gate = new Promise(resolve => {
@@ -143,16 +168,26 @@ describe('ReactFiberExternalRuntimeCommit', () => {
     // Every commit is reported, including batchless mounts: generation 1,
     // empty delta, one per root.
     expect(commitsOn(events, containerA)).toEqual([
-      {type: 'rootCommitted', container: containerA, tokens: [], generation: 1},
+      {
+        type: 'rootCommitted',
+        container: containerA,
+        batchIds: [],
+        generation: 1,
+      },
     ]);
     expect(commitsOn(events, containerB)).toEqual([
-      {type: 'rootCommitted', container: containerB, tokens: [], generation: 1},
+      {
+        type: 'rootCommitted',
+        container: containerB,
+        batchIds: [],
+        generation: 1,
+      },
     ]);
 
-    let token = null;
+    let batchId = null;
     await act(() => {
       startTransition(() => {
-        token = React.unstable_getCurrentWriteBatch();
+        batchId = React.unstable_getCurrentWriteBatch();
         setA(true);
         setB(true);
       });
@@ -160,20 +195,25 @@ describe('ReactFiberExternalRuntimeCommit', () => {
     // Root A committed the spanning batch; root B is suspended on the gate.
     assertLog(['A on=true']);
 
-    // The commit is reported on root A — and only root A — with the token in
+    // The commit is reported on root A — and only root A — with the batchId in
     // the delta and A's bumped generation…
     expect(commitsOn(events, containerA)).toEqual([
-      {type: 'rootCommitted', container: containerA, tokens: [], generation: 1},
       {
         type: 'rootCommitted',
         container: containerA,
-        tokens: [token],
+        batchIds: [],
+        generation: 1,
+      },
+      {
+        type: 'rootCommitted',
+        container: containerA,
+        batchIds: [batchId],
         generation: 2,
       },
     ]);
     expect(commitsOn(events, containerB).length).toBe(1);
-    // …while the token stays live: no retirement until root B commits.
-    expect(events.retired.map(r => r.token)).not.toContain(token);
+    // …while the batchId stays live: no retirement until root B commits.
+    expect(events.retired.map(r => r.batchId)).not.toContain(batchId);
 
     // Root B settles and commits: reported on B with B's own generation.
     resolveGate();
@@ -183,17 +223,17 @@ describe('ReactFiberExternalRuntimeCommit', () => {
     expect(bCommit).toEqual({
       type: 'rootCommitted',
       container: containerB,
-      tokens: [token],
+      batchIds: [batchId],
       generation: 2,
     });
 
     // Retirement fires exactly once, committed — and AFTER the last root's
     // commit report: the report is the cause, retirement its consequence.
-    expect(events.retired.filter(r => r.token === token)).toEqual([
-      {type: 'retired', token, committed: true},
+    expect(events.retired.filter(r => r.batchId === batchId)).toEqual([
+      {type: 'retired', batchId, committed: true},
     ]);
     const retireIndex = events.log.findIndex(
-      e => e.type === 'retired' && e.token === token,
+      e => e.type === 'retired' && e.batchId === batchId,
     );
     expect(retireIndex).toBeGreaterThan(events.log.indexOf(bCommit));
     unsubscribe();
@@ -242,10 +282,10 @@ describe('ReactFiberExternalRuntimeCommit', () => {
     });
     assertLog(['A on=false n=1']);
 
-    let token = null;
+    let batchId = null;
     await act(() => {
       startTransition(() => {
-        token = React.unstable_getCurrentWriteBatch();
+        batchId = React.unstable_getCurrentWriteBatch();
         setA(true);
         setB(true);
       });
@@ -259,13 +299,13 @@ describe('ReactFiberExternalRuntimeCommit', () => {
     const bCommits = commitsOn(events, containerB);
     expect(aCommits.map(c => c.generation)).toEqual([1, 2, 3]);
     expect(bCommits.map(c => c.generation)).toEqual([1, 2]);
-    const aBatchCommits = aCommits.filter(c => c.tokens.includes(token));
-    const bBatchCommits = bCommits.filter(c => c.tokens.includes(token));
+    const aBatchCommits = aCommits.filter(c => c.batchIds.includes(batchId));
+    const bBatchCommits = bCommits.filter(c => c.batchIds.includes(batchId));
     expect(aBatchCommits).toEqual([
       {
         type: 'rootCommitted',
         container: containerA,
-        tokens: [token],
+        batchIds: [batchId],
         generation: 3,
       },
     ]);
@@ -273,17 +313,17 @@ describe('ReactFiberExternalRuntimeCommit', () => {
       {
         type: 'rootCommitted',
         container: containerB,
-        tokens: [token],
+        batchIds: [batchId],
         generation: 2,
       },
     ]);
 
     // Exactly one retirement, positioned after BOTH per-root reports.
-    expect(events.retired.filter(r => r.token === token)).toEqual([
-      {type: 'retired', token, committed: true},
+    expect(events.retired.filter(r => r.batchId === batchId)).toEqual([
+      {type: 'retired', batchId, committed: true},
     ]);
     const retireIndex = events.log.findIndex(
-      e => e.type === 'retired' && e.token === token,
+      e => e.type === 'retired' && e.batchId === batchId,
     );
     expect(retireIndex).toBeGreaterThan(events.log.indexOf(aBatchCommits[0]));
     expect(retireIndex).toBeGreaterThan(events.log.indexOf(bBatchCommits[0]));
@@ -293,7 +333,7 @@ describe('ReactFiberExternalRuntimeCommit', () => {
   // Spec test 17: a root whose share of the batch is pruned (its pending
   // update dies with a deleted subtree) never reports the batch as
   // committed — its committed view never showed the batch's writes — while
-  // the token still retires exactly once, committed=true, because the other
+  // the batchId still retires exactly once, committed=true, because the other
   // root did commit it.
   it('never reports a batch on a root where its work was pruned by deletion', async () => {
     const {events, unsubscribe} = subscribe();
@@ -331,10 +371,10 @@ describe('ReactFiberExternalRuntimeCommit', () => {
     assertLog(['B on=false']);
     const containerB = lastContainer(events);
 
-    let token = null;
+    let batchId = null;
     await act(() => {
       startTransition(() => {
-        token = React.unstable_getCurrentWriteBatch();
+        batchId = React.unstable_getCurrentWriteBatch();
         setA(true);
         setB(true);
       });
@@ -342,10 +382,10 @@ describe('ReactFiberExternalRuntimeCommit', () => {
     // A committed the batch; B is suspended, batch pending there.
     assertLog(['A on=true']);
     expect(
-      commitsOn(events, containerA).filter(c => c.tokens.includes(token))
+      commitsOn(events, containerA).filter(c => c.batchIds.includes(batchId))
         .length,
     ).toBe(1);
-    expect(events.retired.map(r => r.token)).not.toContain(token);
+    expect(events.retired.map(r => r.batchId)).not.toContain(batchId);
 
     // Replace root B's tree with unrelated content. CompB unmounts, taking
     // its pending transition update with it: root B is done with the batch
@@ -355,23 +395,23 @@ describe('ReactFiberExternalRuntimeCommit', () => {
     });
     assertLog(['B replaced']);
 
-    // No commit report on B ever contains the token: B's committed view
+    // No commit report on B ever contains the batchId: B's committed view
     // never showed the batch's writes (prune ≠ commit).
     expect(
-      commitsOn(events, containerB).filter(c => c.tokens.includes(token)),
+      commitsOn(events, containerB).filter(c => c.batchIds.includes(batchId)),
     ).toEqual([]);
 
-    // The token still retired exactly once, committed=true (root A committed
+    // The batchId still retired exactly once, committed=true (root A committed
     // it), at the commit that pruned B's share — after B's (batchless)
     // commit report for that same commit.
-    expect(events.retired.filter(r => r.token === token)).toEqual([
-      {type: 'retired', token, committed: true},
+    expect(events.retired.filter(r => r.batchId === batchId)).toEqual([
+      {type: 'retired', batchId, committed: true},
     ]);
     const bCommits = commitsOn(events, containerB);
     const pruneCommit = bCommits[bCommits.length - 1];
-    expect(pruneCommit.tokens).toEqual([]);
+    expect(pruneCommit.batchIds).toEqual([]);
     const retireIndex = events.log.findIndex(
-      e => e.type === 'retired' && e.token === token,
+      e => e.type === 'retired' && e.batchId === batchId,
     );
     expect(retireIndex).toBeGreaterThan(events.log.indexOf(pruneCommit));
 
@@ -379,7 +419,7 @@ describe('ReactFiberExternalRuntimeCommit', () => {
     resolveGate();
     await act(() => gate);
     assertLog([]);
-    expect(events.retired.filter(r => r.token === token).length).toBe(1);
+    expect(events.retired.filter(r => r.batchId === batchId).length).toBe(1);
     unsubscribe();
   });
 
@@ -391,20 +431,21 @@ describe('ReactFiberExternalRuntimeCommit', () => {
   // commit; a batch the root already committed is never dropped from one.
   it('a commit exposes exactly the write set the committing pass rendered', async () => {
     const {events, unsubscribe} = subscribe();
+    const alloc = installAllocator();
 
     // Replays the whole event log, asserting the closure invariant at every
     // commit of every root.
     function assertWriteSetClosure() {
       const lastPassByContainer = new Map();
       const tableByContainer = new Map();
-      const retiredTokens = new Set();
+      const retiredBatchIds = new Set();
       let commitsChecked = 0;
       for (let i = 0; i < events.log.length; i++) {
         const entry = events.log[i];
         if (entry.type === 'passStart') {
           lastPassByContainer.set(entry.container, entry.included);
         } else if (entry.type === 'retired') {
-          retiredTokens.add(entry.token);
+          retiredBatchIds.add(entry.batchId);
         } else if (entry.type === 'rootCommitted') {
           const included = lastPassByContainer.get(entry.container) || [];
           let table = tableByContainer.get(entry.container);
@@ -414,13 +455,13 @@ describe('ReactFiberExternalRuntimeCommit', () => {
           }
           const liveTable = [];
           table.forEach(t => {
-            if (!retiredTokens.has(t)) {
+            if (!retiredBatchIds.has(t)) {
               liveTable.push(t);
             }
           });
-          const exposed = new Set([...liveTable, ...entry.tokens]);
+          const exposed = new Set([...liveTable, ...entry.batchIds]);
           expect(new Set(included)).toEqual(exposed);
-          entry.tokens.forEach(t => table.add(t));
+          entry.batchIds.forEach(t => table.add(t));
           commitsChecked++;
         }
       }
@@ -485,18 +526,18 @@ describe('ReactFiberExternalRuntimeCommit', () => {
     const urgentCommit = commitsOn(events, containerA)[1];
     // The urgent commit's delta is exactly {u1}: the pending, unrendered t1
     // stays out of the committed view.
-    expect(urgentCommit.tokens).toEqual([u1]);
-    expect(t1 & 1).toBe(1);
-    expect(u1 & 1).toBe(0);
-    expect(events.retired.map(r => r.token)).not.toContain(t1);
+    expect(urgentCommit.batchIds).toEqual([u1]);
+    expect(alloc.deferredOf(t1)).toBe(true);
+    expect(alloc.deferredOf(u1)).toBe(false);
+    expect(events.retired.map(r => r.batchId)).not.toContain(t1);
 
     // t1 settles and commits: its own delta, in its own commit.
     resolveGateA();
     await act(() => gateA);
     assertLog(['A v=1 n=1']);
-    expect(commitsOn(events, containerA)[2].tokens).toEqual([t1]);
-    expect(events.retired.filter(r => r.token === t1)).toEqual([
-      {type: 'retired', token: t1, committed: true},
+    expect(commitsOn(events, containerA)[2].batchIds).toEqual([t1]);
+    expect(events.retired.filter(r => r.batchId === t1)).toEqual([
+      {type: 'retired', batchId: t1, committed: true},
     ]);
 
     // Phase 2 — lock-in inclusion: t2 spans roots A and B; A commits it
@@ -518,7 +559,7 @@ describe('ReactFiberExternalRuntimeCommit', () => {
       });
     });
     assertLog(['A v=1 n=2']); // A committed t2; B suspended on gateB
-    expect(commitsOn(events, containerA)[3].tokens).toEqual([t2]);
+    expect(commitsOn(events, containerA)[3].batchIds).toEqual([t2]);
 
     let u2 = null;
     await act(() => {
@@ -529,7 +570,7 @@ describe('ReactFiberExternalRuntimeCommit', () => {
     const lockInCommit = commitsOn(events, containerA)[4];
     // Delta is only the urgent batch; the pass itself included the locked-in
     // t2 as well — the closure check below proves included == table ∪ delta.
-    expect(lockInCommit.tokens).toEqual([u2]);
+    expect(lockInCommit.batchIds).toEqual([u2]);
     const lockInPassIndex = events.log.lastIndexOf(
       events.passes[events.passes.length - 1],
     );
@@ -540,8 +581,8 @@ describe('ReactFiberExternalRuntimeCommit', () => {
     resolveGateB();
     await act(() => gateB);
     assertLog(['B on=true']);
-    expect(events.retired.filter(r => r.token === t2)).toEqual([
-      {type: 'retired', token: t2, committed: true},
+    expect(events.retired.filter(r => r.batchId === t2)).toEqual([
+      {type: 'retired', batchId: t2, committed: true},
     ]);
 
     // The closure invariant held at every commit of every root above:
@@ -553,11 +594,11 @@ describe('ReactFiberExternalRuntimeCommit', () => {
   });
 
   // Write-set closure under ENTANGLED sibling transitions. Two transitions
-  // claim separate lanes and separate tokens, but the second writes through
+  // claim separate lanes and separate batchIds, but the second writes through
   // a hook queue that already holds the first's pending update, so React
   // entangles the lanes: whichever lane names the render, the pass consumes
   // BOTH batches' updates (entangledRenderLanes). The channel must report
-  // the write set the tree actually shows — both tokens included in the
+  // the write set the tree actually shows — both batchIds included in the
   // pass, both in the commit's delta, both retired committed=true — or a
   // consumer resolving reads against included-batches misses a write the
   // committed view visibly contains. (Under enableParallelTransitions —
@@ -596,7 +637,7 @@ describe('ReactFiberExternalRuntimeCommit', () => {
     assertLog([]); // suspended before logging anything
     expect(commitsOn(events, container).length).toBe(1); // mount only
 
-    // Transition 2, a separate event: its own lane, its own token — and an
+    // Transition 2, a separate event: its own lane, its own batchId — and an
     // entanglement with t1 through the shared useState queue.
     let t2 = null;
     await act(() => {
@@ -618,10 +659,10 @@ describe('ReactFiberExternalRuntimeCommit', () => {
     const containerCommits = commitsOn(events, container);
     const finalCommit = containerCommits[containerCommits.length - 1];
     expect(containerCommits.length).toBe(2);
-    expect(new Set(finalCommit.tokens)).toEqual(new Set([t1, t2]));
+    expect(new Set(finalCommit.batchIds)).toEqual(new Set([t1, t2]));
     expect(
       events.retired
-        .filter(r => r.token === t1 || r.token === t2)
+        .filter(r => r.batchId === t1 || r.batchId === t2)
         .map(r => r.committed),
     ).toEqual([true, true]);
 
@@ -668,10 +709,10 @@ describe('ReactFiberExternalRuntimeCommit', () => {
 
     // An update INSIDE the portal subtree: classified, rendered, and
     // committed against the parent root's container.
-    let token = null;
+    let batchId = null;
     await act(() => {
       startTransition(() => {
-        token = React.unstable_getCurrentWriteBatch();
+        batchId = React.unstable_getCurrentWriteBatch();
         setValue(1);
       });
     });
@@ -687,17 +728,17 @@ describe('ReactFiberExternalRuntimeCommit', () => {
         expect(e.container).toBe(container);
       }
     });
-    const tokenCommit = events.commits.find(c => c.tokens.includes(token));
-    expect(tokenCommit).not.toBe(undefined);
-    expect(tokenCommit.container).toBe(container);
+    const batchCommit = events.commits.find(c => c.batchIds.includes(batchId));
+    expect(batchCommit).not.toBe(undefined);
+    expect(batchCommit.container).toBe(container);
     // Per-callstack render context inside the portal names the parent root.
     expect(renderContexts.length).toBeGreaterThanOrEqual(2);
     renderContexts.forEach(ctx => {
       expect(ctx).not.toBe(null);
       expect(ctx.container).toBe(container);
     });
-    expect(events.retired.filter(r => r.token === token)).toEqual([
-      {type: 'retired', token, committed: true},
+    expect(events.retired.filter(r => r.batchId === batchId)).toEqual([
+      {type: 'retired', batchId, committed: true},
     ]);
     unsubscribe();
   });
@@ -738,13 +779,13 @@ describe('ReactFiberExternalRuntimeCommit', () => {
         log.push({
           type: 'rootCommitted',
           container,
-          tokens: committedBatches.slice(),
+          batchIds: committedBatches.slice(),
           generation: rootCommitGeneration,
         });
         mirror.generation = rootCommitGeneration;
       },
-      onBatchRetired(token, committed) {
-        log.push({type: 'retired', token, committed});
+      onBatchRetired(batchId, committed) {
+        log.push({type: 'retired', batchId, committed});
         mirror.retiredCount++;
       },
       onBeforeMutation(container) {
@@ -820,7 +861,7 @@ describe('ReactFiberExternalRuntimeCommit', () => {
     expect(entryIndex).not.toBe(-1);
     expect(tail[entryIndex].committed).toBe(true);
     expect(tableIndex).not.toBe(-1);
-    expect(new Set(tail[tableIndex].tokens)).toEqual(new Set([t1, t2]));
+    expect(new Set(tail[tableIndex].batchIds)).toEqual(new Set([t1, t2]));
     expect(firstFold).not.toBe(-1);
     expect(lastFold).not.toBe(firstFold); // two folds due at this commit
     expect(beforeIndex).not.toBe(-1);

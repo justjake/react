@@ -318,7 +318,7 @@ function processRootScheduleInMicrotask() {
       prev = root;
 
       // External-runtime batch registry: repair pending edges missed because
-      // an update was scheduled before its batch's token was minted (see
+      // an update was scheduled before its batch's id was created (see
       // batchRegistryBackfillRoot). Must run before the close edge below.
       batchRegistryBackfillRoot(root);
 

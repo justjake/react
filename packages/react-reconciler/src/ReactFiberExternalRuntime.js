@@ -16,7 +16,7 @@ import type {
 
 import ReactSharedInternals from 'shared/ReactSharedInternals';
 import {
-  batchTokensForRender,
+  batchIdsForRender,
   batchRegistryOnRenderStart,
 } from './ReactFiberBatchRegistry';
 
@@ -112,7 +112,7 @@ export function notifyRenderPassStart(root: FiberRoot, lanes: Lanes): void {
     if (runtime.hasListeners) {
       runtime.emitRenderPassStart(
         root.containerInfo,
-        batchTokensForRender(root, lanes),
+        batchIdsForRender(root, lanes),
       );
     }
   }

@@ -19,7 +19,7 @@ import {
 } from './ReactFiberAsyncAction';
 
 /**
- * Batch tokens: stable identities for "a batch of updates React renders and
+ * Batch ids: stable identities for "a batch of updates React renders and
  * retires as a unit", exposed to external state libraries in place of raw
  * lane bits (see ReactExternalRuntime.js).
  *
@@ -27,7 +27,7 @@ import {
  * cursor wraps after 10 claims), so a bit cannot name a batch across time.
  * The registry is EDGE-TRIGGERED from the places the reconciler already
  * mutates its own bookkeeping — never sampled — so a reused bit can never be
- * observed under a stale token:
+ * observed under a stale batch id:
  *
  *   claim   (requestTransitionLane's once-per-event claim)
  *   pending (markRootUpdated: first time this batch gets work on a root)
@@ -41,35 +41,54 @@ import {
  *
  * If a lane bit is claimed again while its previous batch is still pending,
  * React itself cannot distinguish the two batches — they render and retire
- * together. The registry mirrors reality: the existing token is REUSED
+ * together. The registry mirrors reality: the existing batch id is REUSED
  * (explicit merge), rather than pretending two identities exist.
  *
- * Allocation discipline: a token is minted lazily, only when an external
+ * Allocation discipline: a batch id is created lazily, only when an external
  * write actually asks for the current batch. Claims, pending edges, and
- * finish edges on slots without tokens are integer/null checks.
+ * finish edges on slots without ids are integer/null checks.
+ *
+ * WHO allocates the id (protocol v2): a registered BATCH-ID ALLOCATOR when
+ * an external runtime has one (see registerExternalRuntimeBatchIdAllocator
+ * in ReactExternalRuntime.js) — the external store hands out the id from its
+ * own id space, so both sides speak ONE number space with no translation
+ * maps — and this module's own fallback counter otherwise (stock usage and
+ * driverless tests; the protocol keeps working without an allocator). The
+ * id is opaque to React either way: a positive integer, stable for the
+ * batch's life, never reused while live. Deferredness is NOT encoded in the
+ * id (there is no low-bit payload); it is a stored field on the slot, told
+ * to the allocator at creation.
  */
 
 /**
- * A batch token is a non-zero integer: `serial << 1 | deferredBit`, written
- * as `serial * 2 + deferredBit` so the serial is never truncated to 31 bits.
- * 0 is reserved for "no batch" (see getExternalRuntimeCurrentWriteBatch).
- *
- *   token & 1              — 1 for transition-like (deferred) batches:
- *                            renders don't block paint and the batch commits
- *                            later. External stores fork pending state on
- *                            these.
- *   (token - (token & 1))/2 — the mint serial (debug only; stable for the
- *                            token's life, never reused while live).
+ * A batch id is a positive integer naming one batch for its whole life.
+ * BATCH_NONE (0) is reserved for "no batch" (see
+ * getExternalRuntimeCurrentWriteBatch). The integer carries NO payload —
+ * ids from a registered allocator are that allocator's serials, fallback
+ * ids are this module's serials; consumers treat both as opaque.
  */
-export type BatchToken = number;
+export type BatchId = number;
+
+/** The reserved "no batch" id — never allocated, never stored in a slot. */
+export const BATCH_NONE: BatchId = 0;
 
 type Slot = {
-  token: BatchToken | null,
+  /** The live batch occupying this lane's slot, or null between batches
+   * (retirement clears this field and keeps the Slot). */
+  batchId: BatchId | null,
+  /** True for transition-like batches: renders don't block paint and the
+   * batch commits later. External stores fork pending state on these. Set
+   * at batch-identity creation from the lane kind; meaningless (false)
+   * while batchId is null. */
+  deferred: boolean,
+  /** The lane this slot serves — fixed at Slot creation (one persistent
+   * Slot per lane). */
+  lane: Lane,
   /** Roots this batch has scheduled work on and not yet finished. */
   roots: Set<FiberRoot> | null,
   /** Roots that already committed this batch while it stays pending on
    * others: renders on these roots must keep including the batch (their
-   * committed tree already shows it) even though the token has not retired. */
+   * committed tree already shows it) even though the batch has not retired. */
   committedRoots: Set<FiberRoot> | null,
   /** Open async-action thenable this store-only batch is parked on: the
    * close edge must not retire it until the action settles. */
@@ -78,7 +97,10 @@ type Slot = {
 
 // One slot per lane index (31 lanes).
 const slots: Array<Slot | null> = new Array<Slot | null>(31).fill(null);
-let nextTokenSerial = 1;
+// Fallback id source when no allocator is registered. Monotonic for the
+// module's life — never reset, even by resetBatchRegistryForTest — so a
+// stale id can never collide with a later batch.
+let nextFallbackBatchId = 1;
 
 // Per-root commit generation: how many times each root has committed.
 // Maintained unconditionally (like the rest of the registry's bookkeeping)
@@ -115,55 +137,87 @@ function slotFor(lane: Lane): Slot {
   const index = 31 - Math.clz32(lane);
   let slot = slots[index];
   if (slot === null) {
-    slot = {token: null, roots: null, committedRoots: null, parked: null};
+    slot = {
+      batchId: null,
+      deferred: false,
+      lane,
+      roots: null,
+      committedRoots: null,
+      parked: null,
+    };
     slots[index] = slot;
   }
   return slot;
 }
 
 /**
- * Returns the token for the batch an external write issued right now belongs
- * to, minting it on first use. `lane` is what requestUpdateLane would assign;
- * `isDeferred` classifies it (transition-like or not).
+ * Returns the id of the batch an external write issued right now belongs
+ * to, creating the batch identity on first use — THE one creation site
+ * (every classification arm of getCurrentWriteBatch funnels here). `lane`
+ * is what requestUpdateLane would assign; `deferred` classifies it
+ * (transition-like or not).
+ *
+ * Creation asks the registered batch-id allocator when one exists —
+ * passing `deferred`, which is also how the allocator's owner learns each
+ * batch's classification — and falls back to this module's own counter
+ * otherwise. The allocator must return a positive integer never equal to a
+ * currently live id; it is called at whatever position the write happens
+ * (mid-render, mid-commit, inside listeners), so it must be re-entrant-safe
+ * and allocation-only on its own side.
  */
-export function getOrMintBatchToken(
-  lane: Lane,
-  isDeferred: boolean,
-): BatchToken {
+export function getOrCreateBatchId(lane: Lane, deferred: boolean): BatchId {
   const slot = slotFor(lane);
-  if (slot.token === null) {
-    slot.token = nextTokenSerial++ * 2 + (isDeferred ? 1 : 0);
+  const existing = slot.batchId;
+  if (existing !== null) {
+    return existing;
   }
-  return slot.token;
+  const runtime = getExternalRuntime();
+  const allocate = runtime !== null ? runtime.allocateBatchId : null;
+  const batchId =
+    allocate !== null ? allocate(deferred) : nextFallbackBatchId++;
+  if (__DEV__) {
+    if (!Number.isInteger(batchId) || batchId <= 0) {
+      console.error(
+        'The registered batch-id allocator returned %s. Batch ids must be ' +
+          'positive integers (0 is reserved for "no batch").',
+        batchId,
+      );
+    }
+  }
+  slot.batchId = batchId;
+  slot.deferred = deferred;
+  return batchId;
 }
 
 /**
- * The lane a LIVE token's batch occupies, or NoLane (0) when the token is
- * retired, unknown, or 0 ("no batch"). Used by runInBatch to resolve its
- * scheduling target: a token is live exactly while its slot still holds it,
- * including the window inside its retiring commit's onRootCommitted report
- * (retirement emits are deferred until after that report, so a write
- * delivered there lands on the outgoing token — the documented merge rule).
+ * The slot a LIVE batch occupies (its lane and deferred flag), or null when
+ * the id is retired, unknown, or BATCH_NONE. Used by runInBatch to resolve
+ * its scheduling target: a batch is live exactly while its slot still holds
+ * its id, including the window inside its retiring commit's onRootCommitted
+ * report (retirement emits are deferred until after that report, so a write
+ * delivered there lands on the outgoing batch — the documented merge rule).
  */
-export function lookupBatchTokenLane(token: BatchToken): Lane {
-  if (token !== 0) {
+export function lookupLiveBatchSlot(
+  batchId: BatchId,
+): null | {+lane: Lane, +deferred: boolean, ...} {
+  if (batchId !== BATCH_NONE) {
     for (let index = 0; index < slots.length; index++) {
       const slot = slots[index];
-      if (slot !== null && slot.token === token) {
-        return (1 << index) as any;
+      if (slot !== null && slot.batchId === batchId) {
+        return slot;
       }
     }
   }
-  return 0 as any; // NoLane
+  return null;
 }
 
 /**
  * Pending edge. Called from the markRootUpdated wrapper on every scheduled
- * update; must be near-free when no token exists for the lane.
+ * update; must be near-free when no batch id exists for the lane.
  */
 export function batchRegistryOnRootUpdated(root: FiberRoot, lane: Lane): void {
   const slot = slots[31 - Math.clz32(lane)];
-  if (slot === null || slot.token === null) {
+  if (slot === null || slot.batchId === null) {
     return;
   }
   if (slot.roots === null) {
@@ -173,22 +227,22 @@ export function batchRegistryOnRootUpdated(root: FiberRoot, lane: Lane): void {
 }
 
 /**
- * Pending-edge repair. The pending edge only records a root when the token
- * already exists, so an update scheduled BEFORE its batch's first store write
- * (`startTransition(() => { setState(x); store.write(y); })` — ordinary line
- * order) is invisible to the registry. Called from the root scheduler's
- * microtask for every root still holding work, before the close edge decides
- * a batch is store-only: any live token whose lane is pending on the root
- * records it, so the finish edge retires the batch at its real commit
- * instead of the close edge retiring it early.
+ * Pending-edge repair. The pending edge only records a root when the batch
+ * id already exists, so an update scheduled BEFORE its batch's first store
+ * write (`startTransition(() => { setState(x); store.write(y); })` —
+ * ordinary line order) is invisible to the registry. Called from the root
+ * scheduler's microtask for every root still holding work, before the close
+ * edge decides a batch is store-only: any live batch whose lane is pending
+ * on the root records it, so the finish edge retires the batch at its real
+ * commit instead of the close edge retiring it early.
  *
- * Cost per scheduled root: iterates only slots holding live tokens
+ * Cost per scheduled root: iterates only slots holding live batches
  * (typically 0–2); Set.add is idempotent for roots already recorded.
  */
 export function batchRegistryBackfillRoot(root: FiberRoot): void {
   for (let index = 0; index < slots.length; index++) {
     const slot = slots[index];
-    if (slot === null || slot.token === null) {
+    if (slot === null || slot.batchId === null) {
       continue;
     }
     if ((root.pendingLanes & (1 << index)) !== 0) {
@@ -207,18 +261,18 @@ export function batchRegistryBackfillRoot(root: FiberRoot): void {
  * pending on the root. A batch is done on a root when its lane is no longer
  * pending there. Its lane is in finishedLanes only when this commit rendered
  * its updates (directly or entangled); otherwise its updates died with
- * deleted fibers and were pruned from the surviving tree. A token retires
+ * deleted fibers and were pruned from the surviving tree. A batch retires
  * exactly once, when its last pending root is done with it.
  *
  * This edge is also the per-root commit report (spec §4.1 fact 3):
  * onRootCommitted fires on every commit with the root's new commit
  * generation and the batches this commit made visible on this root, BEFORE
- * any retirement the commit causes — a token retires because its last
+ * any retirement the commit causes — a batch retires because its last
  * pending root committed (or pruned) it, so the per-root report is the
  * cause and the retirement edge its consequence (spec case-11 step 6).
  * Listeners run between the bookkeeping mutation and the retirement emit;
  * a write issued inside an onRootCommitted listener for a lane retiring in
- * this very commit lands on the outgoing token (the registry's ordinary
+ * this very commit lands on the outgoing batch (the registry's ordinary
  * merge-on-lane-reuse rule already covers reused lanes, and the retirement
  * edge still fires exactly once, after).
  *
@@ -235,7 +289,7 @@ export function batchRegistryBackfillRoot(root: FiberRoot): void {
  * lanes that merely got entangled mid-flight (updates not in this tree)
  * out of the report.
  *
- * Cost: iterates only slots holding live tokens (typically 0–2), plus one
+ * Cost: iterates only slots holding live batches (typically 0–2), plus one
  * WeakMap bump per commit.
  */
 export function batchRegistryOnRootFinished(
@@ -257,7 +311,7 @@ export function batchRegistryOnRootFinished(
         finishedLanes
       : renderedLanesStash;
 
-  let committedTokens: Array<BatchToken> | null = null;
+  let committedBatchIds: Array<BatchId> | null = null;
   let retirements: Array<{slot: Slot, committed: boolean}> | null = null;
 
   for (let index = 0; index < slots.length; index++) {
@@ -265,8 +319,8 @@ export function batchRegistryOnRootFinished(
     if (slot === null) {
       continue;
     }
-    const token = slot.token;
-    if (token === null) {
+    const batchId = slot.batchId;
+    if (batchId === null) {
       continue;
     }
     const lane = 1 << index;
@@ -285,10 +339,10 @@ export function batchRegistryOnRootFinished(
         roots !== null &&
         roots.has(root)
       ) {
-        if (committedTokens === null) {
-          committedTokens = [];
+        if (committedBatchIds === null) {
+          committedBatchIds = [];
         }
-        committedTokens.push(token);
+        committedBatchIds.push(batchId);
         if (slot.committedRoots === null) {
           slot.committedRoots = new Set();
         }
@@ -302,16 +356,16 @@ export function batchRegistryOnRootFinished(
     const committed = (finishedLanes & lane) !== 0;
     if (committed) {
       // This commit made the batch's updates visible on this root: part of
-      // the root's committed-batch delta, whether or not the token also
+      // the root's committed-batch delta, whether or not the batch also
       // retires here.
-      if (committedTokens === null) {
-        committedTokens = [];
+      if (committedBatchIds === null) {
+        committedBatchIds = [];
       }
-      committedTokens.push(token);
+      committedBatchIds.push(batchId);
     }
     roots.delete(root);
     if (roots.size === 0) {
-      // Last pending root: the token retires at this commit — but emit the
+      // Last pending root: the batch retires at this commit — but emit the
       // per-root commit report first (see the function comment).
       if (retirements === null) {
         retirements = [];
@@ -339,7 +393,7 @@ export function batchRegistryOnRootFinished(
   if (runtime !== null && runtime.hasListeners) {
     runtime.emitRootCommitted(
       root.containerInfo,
-      committedTokens === null ? [] : committedTokens,
+      committedBatchIds === null ? [] : committedBatchIds,
       generation,
     );
   }
@@ -353,16 +407,17 @@ export function batchRegistryOnRootFinished(
 
 /**
  * Close edge: the scheduling microtask for the current event is done
- * (currentEventTransitionLane resets). A token whose batch never scheduled
- * React work on any root will never see a finish edge — retire it now.
+ * (currentEventTransitionLane resets). A batch that never scheduled React
+ * work on any root will never see a finish edge — retire it now.
  *
- * Exception: a store-only batch whose transition turned out to be an async
- * action (the scope returned a promise) must stay pending for the action's
- * whole life — the action's post-await updates commit later, and retiring at
- * event close would leak the batch's store writes into committed state
- * mid-action. Entanglement is only knowable after the scope returns, which
- * is before this microtask runs, so the check belongs exactly here: park the
- * slot on the action thenable and re-run the close decision when it settles.
+ * Exception: a store-only DEFERRED batch whose transition turned out to be
+ * an async action (the scope returned a promise) must stay pending for the
+ * action's whole life — the action's post-await updates commit later, and
+ * retiring at event close would leak the batch's store writes into
+ * committed state mid-action. Entanglement is only knowable after the scope
+ * returns, which is before this microtask runs, so the check belongs
+ * exactly here: park the slot on the action thenable and re-run the close
+ * decision when it settles.
  */
 export function batchRegistryOnEventClosed(): void {
   const actionLane = peekEntangledActionLane();
@@ -370,13 +425,13 @@ export function batchRegistryOnEventClosed(): void {
     const slot = slots[i];
     if (
       slot === null ||
-      slot.token === null ||
+      slot.batchId === null ||
       slot.parked !== null ||
       (slot.roots !== null && slot.roots.size > 0)
     ) {
       continue;
     }
-    if ((slot.token & 1) === 1 && 1 << i === actionLane) {
+    if (slot.deferred && 1 << i === actionLane) {
       const actionThenable = peekEntangledActionThenable();
       if (actionThenable !== null) {
         parkUntilActionSettles(slot, actionThenable);
@@ -392,15 +447,24 @@ function parkUntilActionSettles(
   actionThenable: Thenable<void>,
 ): void {
   slot.parked = actionThenable;
+  // Self-invalidation: the callback captures the batch id it parked for and
+  // no-ops if the slot's tenancy changed by the time the action settles —
+  // whether because a test reset scrubbed the slot (resetBatchRegistryForTest)
+  // or because retirement and a fresh claim recycled the lane. Without the
+  // id check, a stale settlement could retire an unrelated successor batch.
+  const parkedBatchId = slot.batchId;
   const onSettle = () => {
-    if (slot.parked !== actionThenable) {
+    if (slot.parked !== actionThenable || slot.batchId !== parkedBatchId) {
       return;
     }
     slot.parked = null;
     // The action settled. If its updates scheduled React work under this
     // batch the finish edge owns retirement; a still store-only batch
     // retires now, converging with the action's outcome.
-    if (slot.token !== null && (slot.roots === null || slot.roots.size === 0)) {
+    if (
+      slot.batchId !== null &&
+      (slot.roots === null || slot.roots.size === 0)
+    ) {
       retireSlot(slot, false);
     }
   };
@@ -408,21 +472,50 @@ function parkUntilActionSettles(
 }
 
 function retireSlot(slot: Slot, committed: boolean): void {
-  const token = slot.token;
-  slot.token = null;
+  const batchId = slot.batchId;
+  slot.batchId = null;
+  slot.deferred = false;
   slot.roots = null;
   slot.committedRoots = null;
   slot.parked = null;
-  if (token !== null) {
+  if (batchId !== null) {
     const runtime = getExternalRuntime();
     if (runtime !== null && runtime.hasListeners) {
-      runtime.emitBatchRetired(token, committed);
+      runtime.emitBatchRetired(batchId, committed);
     }
   }
 }
 
 /**
- * The batches a render pass on `root` includes: the live tokens for its
+ * TEST-ONLY. Clears the FULL tenancy of every slot — batch id, deferred
+ * flag, root sets, committed-root sets, parked state — without emitting
+ * retirement events (this is a scrub, not a batch outcome). Test harnesses
+ * call it between tests so a stale slot from one test can never claim,
+ * merge with, or settle over a batch of the next (external allocators may
+ * restart their id space per test; a parked settlement that fires late
+ * additionally no-ops via its captured batch id). Never call this in
+ * production: live batches lose their retirement edge.
+ *
+ * The fallback id counter is NOT reset: fallback ids stay monotonic for the
+ * module's life, mirroring the allocator-side rule that batch ids are
+ * monotonic across engine resets.
+ */
+export function resetBatchRegistryForTest(): void {
+  for (let i = 0; i < slots.length; i++) {
+    const slot = slots[i];
+    if (slot === null) {
+      continue;
+    }
+    slot.batchId = null;
+    slot.deferred = false;
+    slot.roots = null;
+    slot.committedRoots = null;
+    slot.parked = null;
+  }
+}
+
+/**
+ * The batches a render pass on `root` includes: the live batch ids for its
  * ENTANGLED render lanes, plus every still-pending batch this root has
  * ALREADY committed — the root's committed tree shows those writes, so
  * hiding them from its later renders (urgent ones especially) would tear
@@ -434,22 +527,22 @@ function retireSlot(slot: Slot, committed: boolean): void {
  * render. E.g. under enableParallelTransitions (www) a sibling transition
  * renders on its own lane, but a second transition writing through a shared
  * hook queue entangles with the first: the pass renders BOTH batches'
- * updates and must report both tokens, or a consumer resolving reads
- * against included-batches misses a write the tree visibly shows.
+ * updates and must report both ids, or a consumer resolving reads against
+ * included-batches misses a write the tree visibly shows.
  */
-export function batchTokensForRender(
+export function batchIdsForRender(
   root: FiberRoot,
   lanes: Lanes,
-): Array<BatchToken> {
-  const tokens: Array<BatchToken> = [];
+): Array<BatchId> {
+  const batchIds: Array<BatchId> = [];
   const entangledRenderLanes = getEntangledLanes(root, lanes);
   let remaining = entangledRenderLanes;
   while (remaining !== 0) {
     const index = 31 - Math.clz32(remaining);
     remaining &= ~(1 << index);
     const slot = slots[index];
-    if (slot !== null && slot.token !== null) {
-      tokens.push(slot.token);
+    if (slot !== null && slot.batchId !== null) {
+      batchIds.push(slot.batchId);
     }
   }
   for (let i = 0; i < slots.length; i++) {
@@ -457,15 +550,15 @@ export function batchTokensForRender(
     if (slot === null) {
       continue;
     }
-    const token = slot.token;
+    const batchId = slot.batchId;
     if (
-      token !== null &&
+      batchId !== null &&
       slot.committedRoots !== null &&
       slot.committedRoots.has(root) &&
       ((entangledRenderLanes >> i) & 1) === 0 // not already collected above
     ) {
-      tokens.push(token);
+      batchIds.push(batchId);
     }
   }
-  return tokens;
+  return batchIds;
 }

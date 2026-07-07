@@ -94,19 +94,44 @@ describe('ReactFiberExternalRuntimePass', () => {
         const entry = {
           type: 'rootCommitted',
           container,
-          tokens: committedBatches.slice(),
+          batchIds: committedBatches.slice(),
           generation: rootCommitGeneration,
         };
         events.log.push(entry);
         events.commits.push(entry);
       },
-      onBatchRetired(token, committed) {
-        const entry = {type: 'retired', token, committed};
+      onBatchRetired(batchId, committed) {
+        const entry = {type: 'retired', batchId, committed};
         events.log.push(entry);
         events.retired.push(entry);
       },
     });
     return {events, unsubscribe};
+  }
+
+  // Registers a batch-id allocator standing in for an external store; the
+  // deferred classification of each batch is told to the allocator at
+  // creation — the protocol's one deferredness exposure.
+  function installAllocator() {
+    const allocated = new Map(); // batchId -> deferred
+    let nextId = 101;
+    const unregister = React.unstable_registerBatchIdAllocator(deferred => {
+      const batchId = nextId++;
+      allocated.set(batchId, deferred);
+      return batchId;
+    });
+    return {
+      allocated,
+      deferredOf(batchId) {
+        if (!allocated.has(batchId)) {
+          throw new Error(
+            `batch id ${batchId} was not allocated by this allocator`,
+          );
+        }
+        return allocated.get(batchId);
+      },
+      unregister,
+    };
   }
 
   // Events for one container, in order, as compact strings — the shape most
@@ -325,6 +350,7 @@ describe('ReactFiberExternalRuntimePass', () => {
   // reaches the committed view through its own (earlier) commit.
   it('wall-clock pass scope is wrong: a yield-gap write joins the ambient batch, not the open pass', async () => {
     const {events, unsubscribe} = subscribe();
+    const alloc = installAllocator();
     let setValue;
     let setUrgent;
     function App() {
@@ -348,7 +374,7 @@ describe('ReactFiberExternalRuntimePass', () => {
     const container = events.passes[0].container;
 
     let t = null;
-    let gapToken = null;
+    let gapBatchId = null;
     await act(async () => {
       startTransition(() => {
         t = React.unstable_getCurrentWriteBatch();
@@ -365,11 +391,11 @@ describe('ReactFiberExternalRuntimePass', () => {
         frameEventsFor(events, container, events.log.indexOf(openFrame) + 1),
       ).toEqual(['yield']);
 
-      gapToken = React.unstable_getCurrentWriteBatch();
-      setUrgent(1); // same callstack: joins gapToken's ambient batch
-      expect(gapToken).not.toBe(t);
-      expect(gapToken & 1).toBe(0); // urgent, not deferred
-      expect(t & 1).toBe(1);
+      gapBatchId = React.unstable_getCurrentWriteBatch();
+      setUrgent(1); // same callstack: joins gapBatchId's ambient batch
+      expect(gapBatchId).not.toBe(t);
+      expect(alloc.deferredOf(gapBatchId)).toBe(false); // urgent, not deferred
+      expect(alloc.deferredOf(t)).toBe(true);
 
       // Default priority does not preempt a transition: the open pass
       // resumes and finishes WITHOUT the gap write (still U0), commits,
@@ -380,13 +406,13 @@ describe('ReactFiberExternalRuntimePass', () => {
     // The open pass committed exactly its own write set — the gap write,
     // which wall-clock attribution would have folded into it (tearing the
     // committed view), landed in its own distinct, later commit.
-    const gapCommit = events.commits.find(c => c.tokens.includes(gapToken));
-    const tCommit = events.commits.find(c => c.tokens.includes(t));
+    const gapCommit = events.commits.find(c => c.batchIds.includes(gapBatchId));
+    const tCommit = events.commits.find(c => c.batchIds.includes(t));
     expect(gapCommit).not.toBe(undefined);
     expect(tCommit).not.toBe(undefined);
     expect(gapCommit).not.toBe(tCommit);
-    expect(tCommit.tokens).toEqual([t]); // no gap-write leak into the pass
-    expect(gapCommit.tokens).toEqual([gapToken]);
+    expect(tCommit.batchIds).toEqual([t]); // no gap-write leak into the pass
+    expect(gapCommit.batchIds).toEqual([gapBatchId]);
     expect(events.log.indexOf(tCommit)).toBeLessThan(
       events.log.indexOf(gapCommit),
     );
@@ -399,6 +425,7 @@ describe('ReactFiberExternalRuntimePass', () => {
   // pass's batch reaches the committed view only through a fresh pass.
   it('an urgent commit discards an older yielded pass before any committed-view advance', async () => {
     const {events, unsubscribe} = subscribe();
+    const alloc = installAllocator();
     let setValue;
     let setUrgent;
     function App() {
@@ -442,8 +469,8 @@ describe('ReactFiberExternalRuntimePass', () => {
         setUrgent(1);
       });
       assertLog(['U1', 'A0', 'B0', 'C0']);
-      expect(t & 1).toBe(1);
-      expect(u & 1).toBe(0);
+      expect(alloc.deferredOf(t)).toBe(true);
+      expect(alloc.deferredOf(u)).toBe(false);
 
       // Serialization, with dispositions: after the yielded pass started,
       // the first same-root pass-end is the DISCARD of that yielded pass,
@@ -474,7 +501,7 @@ describe('ReactFiberExternalRuntimePass', () => {
       // The urgent commit exposes only the urgent batch; the discarded
       // pass's transition batch stays out of the committed view.
       const urgentCommit = tail[commitOffset];
-      expect(urgentCommit.tokens).toEqual([u]);
+      expect(urgentCommit.batchIds).toEqual([u]);
 
       // The interrupted transition then restarts from scratch and commits.
       await waitForAll(['U1', 'A1', 'B1', 'C1']);
@@ -483,19 +510,19 @@ describe('ReactFiberExternalRuntimePass', () => {
     // The transition batch reached the committed view exactly once, through
     // a fresh pass that started after the urgent commit — the discarded
     // pass itself never committed.
-    const commitsWithT = events.commits.filter(c => c.tokens.includes(t));
+    const commitsWithT = events.commits.filter(c => c.batchIds.includes(t));
     expect(commitsWithT.length).toBe(1);
     const passStartsWithT = events.passes.filter(p => p.included.includes(t));
     expect(passStartsWithT.length).toBe(2); // original + post-discard restart
     const urgentCommitIndex = events.log.findIndex(
-      e => e.type === 'rootCommitted' && e.tokens.includes(u),
+      e => e.type === 'rootCommitted' && e.batchIds.includes(u),
     );
     const restartIndex = events.log.indexOf(passStartsWithT[1]);
     const tCommitIndex = events.log.indexOf(commitsWithT[0]);
     expect(urgentCommitIndex).toBeLessThan(restartIndex);
     expect(restartIndex).toBeLessThan(tCommitIndex);
-    expect(events.retired.filter(r => r.token === t)).toEqual([
-      {type: 'retired', token: t, committed: true},
+    expect(events.retired.filter(r => r.batchId === t)).toEqual([
+      {type: 'retired', batchId: t, committed: true},
     ]);
     expect(checkFrameInvariants(events.log)).toEqual([]);
     unsubscribe();
@@ -603,13 +630,13 @@ describe('ReactFiberExternalRuntimePass', () => {
       </>,
     );
     expect(events.commits.length).toBe(2);
-    expect(new Set(events.commits[1].tokens)).toEqual(new Set([tA, tB]));
+    expect(new Set(events.commits[1].batchIds)).toEqual(new Set([tA, tB]));
     expect(
       frameEventsFor(events, container, events.log.indexOf(passB) + 1),
     ).toEqual(['end(commit)', 'rootCommitted']);
     expect(
       events.retired
-        .filter(r => r.token === tA || r.token === tB)
+        .filter(r => r.batchId === tA || r.batchId === tB)
         .map(r => r.committed),
     ).toEqual([true, true]);
     expect(checkFrameInvariants(events.log)).toEqual([]);
@@ -668,7 +695,7 @@ describe('ReactFiberExternalRuntimePass', () => {
     // frame that included the batch is STILL OPEN — under the
     // end-disposition semantics a frame outlives render completion and
     // waits for its commit or discard edge — so no pass-end fired, no
-    // commit report followed, the token is live, the committed view
+    // commit report followed, the batchId is live, the committed view
     // unchanged.
     const completedPass = events.passes[events.passes.length - 1];
     expect(completedPass.included).toEqual([t]);
@@ -680,7 +707,7 @@ describe('ReactFiberExternalRuntimePass', () => {
       ),
     ).toBe(false);
     expect(events.commits.length).toBe(1); // the mount only
-    expect(events.retired.map(r => r.token)).not.toContain(t);
+    expect(events.retired.map(r => r.batchId)).not.toContain(t);
     expect(root).toMatchRenderedOutput('step 0');
 
     // Insertion: an urgent update while the completed tree waits to commit.
@@ -700,8 +727,8 @@ describe('ReactFiberExternalRuntimePass', () => {
     // batch: no commit of the transition batch ever happened.
     expect(events.commits.length).toBe(2);
     const urgentCommit = events.commits[1];
-    expect(urgentCommit.tokens).toEqual([u]);
-    expect(events.retired.map(r => r.token)).not.toContain(t);
+    expect(urgentCommit.batchIds).toEqual([u]);
+    expect(events.retired.map(r => r.batchId)).not.toContain(t);
 
     // The insertion is what finally closed the completed-but-uncommitted
     // frame — with the DISCARD disposition (its pending commit was
@@ -724,7 +751,7 @@ describe('ReactFiberExternalRuntimePass', () => {
     expect(restartIndex).toBeGreaterThan(urgentCommitIndex);
 
     // The image resolves: the suspended commit proceeds, the batch reaches
-    // the committed view exactly once, and the token retires.
+    // the committed view exactly once, and the batchId retires.
     await act(() => {
       ReactNoop.resolveSuspenseyThing('A');
     });
@@ -736,9 +763,9 @@ describe('ReactFiberExternalRuntimePass', () => {
       </>,
     );
     expect(events.commits.length).toBe(3);
-    expect(events.commits[2].tokens).toEqual([t]);
-    expect(events.retired.filter(r => r.token === t)).toEqual([
-      {type: 'retired', token: t, committed: true},
+    expect(events.commits[2].batchIds).toEqual([t]);
+    expect(events.retired.filter(r => r.batchId === t)).toEqual([
+      {type: 'retired', batchId: t, committed: true},
     ]);
 
     // The frame that closed here is the restarted pass's — closed exactly
@@ -762,7 +789,7 @@ describe('ReactFiberExternalRuntimePass', () => {
   // firing each frame's end(discard) edge before it returns and starting
   // nothing new. The abandoned batches stay live; React re-schedules them,
   // and every later retry is a FRESH pass (a new passStart over the same
-  // tokens) that commits normally. A second call with nothing in flight is
+  // batchIds) that commits normally. A second call with nothing in flight is
   // a no-op.
   // @gate enableViewTransition
   it('discardAllWip synchronously closes every open frame on every root; retries are fresh passes', async () => {
@@ -862,13 +889,13 @@ describe('ReactFiberExternalRuntimePass', () => {
     expect(aPasses.length).toBe(2); // original + post-discard fresh pass
     const bPasses = events.passes.filter(p => p.included.includes(tB));
     expect(bPasses.length).toBe(2);
-    const aCommits = events.commits.filter(c => c.tokens.includes(tA));
+    const aCommits = events.commits.filter(c => c.batchIds.includes(tA));
     expect(aCommits.length).toBe(1);
     expect(aCommits[0].container).toBe(containerA);
-    expect(events.retired.filter(r => r.token === tA)).toEqual([
-      {type: 'retired', token: tA, committed: true},
+    expect(events.retired.filter(r => r.batchId === tA)).toEqual([
+      {type: 'retired', batchId: tA, committed: true},
     ]);
-    expect(events.retired.map(r => r.token)).not.toContain(tB);
+    expect(events.retired.map(r => r.batchId)).not.toContain(tB);
 
     // The image resolves: root B's retried pass commits — its frame closes
     // with the commit disposition, only now.
@@ -876,11 +903,11 @@ describe('ReactFiberExternalRuntimePass', () => {
       ReactNoop.resolveSuspenseyThing('X');
     });
     assertLog([]);
-    const bCommits = events.commits.filter(c => c.tokens.includes(tB));
+    const bCommits = events.commits.filter(c => c.batchIds.includes(tB));
     expect(bCommits.length).toBe(1);
     expect(bCommits[0].container).toBe(containerB);
-    expect(events.retired.filter(r => r.token === tB)).toEqual([
-      {type: 'retired', token: tB, committed: true},
+    expect(events.retired.filter(r => r.batchId === tB)).toEqual([
+      {type: 'retired', batchId: tB, committed: true},
     ]);
     expect(checkFrameInvariants(events.log)).toEqual([]);
     unsubscribe();

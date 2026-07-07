@@ -588,5 +588,6 @@
   "600": "A rejected Promise was passed to React without a `reason` property. React threw a generic error from where the Promise was used to assist in identifying the problematic Promise. Make sure that instrumented Promises correctly set the `reason` property when setting `status` to `'rejected'`.",
   "601": "A chunk pair is incomplete. This is a bug in React.",
   "604": "discardAllWip must not be called while React is rendering or committing. Defer the call until React has yielded, e.g. in a microtask.",
-  "605": "runInBatch must not be called while React is rendering. Update attribution during a render pass belongs to the pass itself; queue the call until React has yielded, e.g. in a microtask or at the pass's yield or end edge."
+  "605": "runInBatch must not be called while React is rendering. Update attribution during a render pass belongs to the pass itself; queue the call until React has yielded, e.g. in a microtask or at the pass's yield or end edge.",
+  "606": "A batch-id allocator is already registered. Batch ids are one number space, so only one external store can allocate them; unregister the previous allocator first."
 }

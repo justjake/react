@@ -230,8 +230,9 @@ import {
 } from './ReactEventPriorities';
 import {requestCurrentTransition} from './ReactFiberTransition';
 import {
-  getOrMintBatchToken,
-  lookupBatchTokenLane,
+  getOrCreateBatchId,
+  lookupLiveBatchSlot,
+  resetBatchRegistryForTest,
   batchRegistryOnRootUpdated,
   batchRegistryOnRootFinished,
 } from './ReactFiberBatchRegistry';
@@ -891,9 +892,11 @@ registerExternalRuntimeProvider({
     }
     return null;
   },
-  // Batch identity for an external write happening right now: a non-zero
-  // integer token with the deferred classification in its low bit. Minted
-  // lazily (per batch, never per write); the call never allocates.
+  // Batch identity for an external write happening right now: a positive
+  // integer batch id. Created lazily (per batch, never per write — through
+  // the registered batch-id allocator when one exists, which is also where
+  // the batch's deferred classification is told to the store); per-write
+  // calls after creation never allocate.
   getCurrentWriteBatch(): number {
     let lane;
     let deferred = false;
@@ -912,39 +915,41 @@ registerExternalRuntimeProvider({
         lane = eventPriorityToLane(resolveUpdatePriority());
       }
     }
-    const token = getOrMintBatchToken(lane, deferred);
-    // Minting a token must guarantee a close edge even if the batch never
-    // schedules React work: make sure the scheduling microtask runs.
+    const batchId = getOrCreateBatchId(lane, deferred);
+    // Creating a batch id must guarantee a close edge even if the batch
+    // never schedules React work: make sure the scheduling microtask runs.
     ensureScheduleIsScheduled();
-    return token;
+    return batchId;
   },
   discardAllWip: discardAllWorkInProgress,
   runInBatch: runInBatchImpl,
+  resetBatchRegistryForTest,
 });
 
 /**
  * Run `fn` so the React updates it schedules are attributed to the batch
- * identified by `token` (cosignal spec §4.1 fact 4: lane-scoped scheduling).
- * This is how an external store's late correction rides INSIDE a pending
- * batch and commits with it — a fresh startTransition would mint a lane
- * React never entangles with the batch, so the two could commit separately
- * (torn).
+ * identified by `batchId` (cosignal spec §4.1 fact 4: lane-scoped
+ * scheduling). This is how an external store's late correction rides INSIDE
+ * a pending batch and commits with it — a fresh startTransition would mint
+ * a lane React never entangles with the batch, so the two could commit
+ * separately (torn).
  *
- * Contract, by token state:
- * - LIVE deferred token (`token & 1` === 1): `fn` runs inside a transition
- *   pinned to the batch's own lane. Every update it schedules — setState,
- *   useOptimistic, even a nested startTransition — joins that lane, and
- *   same-lane updates entangle through React's ordinary hook-queue path. An
- *   external write inside `fn` classifies into the same batch:
- *   getCurrentWriteBatch() returns `token`.
- * - LIVE urgent token: `fn` runs at the batch's own event priority (the
- *   lane it was minted from), outside any transition.
- * - RETIRED or unknown token (including 0): the documented fallback — `fn`
- *   runs urgent (discrete priority, outside any transition), so a corrective
- *   update flushes pre-paint. Note a token counts as live through its
- *   retiring commit's onRootCommitted report (retirement emits follow the
- *   report), so a delivery issued inside that listener still lands on the
- *   outgoing token's lane while later calls take this fallback.
+ * Contract, by batch state:
+ * - LIVE deferred batch (its slot's stored deferred flag): `fn` runs inside
+ *   a transition pinned to the batch's own lane. Every update it schedules
+ *   — setState, useOptimistic, even a nested startTransition — joins that
+ *   lane, and same-lane updates entangle through React's ordinary
+ *   hook-queue path. An external write inside `fn` classifies into the same
+ *   batch: getCurrentWriteBatch() returns `batchId`.
+ * - LIVE urgent batch: `fn` runs at the batch's own event priority (the
+ *   lane it was created on), outside any transition.
+ * - RETIRED or unknown batch id (including BATCH_NONE): the documented
+ *   fallback — `fn` runs urgent (discrete priority, outside any
+ *   transition), so a corrective update flushes pre-paint. Note a batch
+ *   counts as live through its retiring commit's onRootCommitted report
+ *   (retirement emits follow the report), so a delivery issued inside that
+ *   listener still lands on the outgoing batch's lane while later calls
+ *   take this fallback.
  *
  * Legal from event handlers, effects (including layout effects and the
  * commit-phase channel listeners), timers, and the yield gaps of an open
@@ -959,7 +964,7 @@ registerExternalRuntimeProvider({
  * synchronous extent (updates scheduled by code `fn` merely arranges to run
  * later — timers, awaited continuations — classify ambiently).
  */
-function runInBatchImpl<R>(token: number, fn: () => R): R {
+function runInBatchImpl<R>(batchId: number, fn: () => R): R {
   if ((executionContext & RenderContext) !== NoContext) {
     throw new Error(
       'runInBatch must not be called while React is rendering. Update ' +
@@ -968,7 +973,8 @@ function runInBatchImpl<R>(token: number, fn: () => R): R {
         "at the pass's yield or end edge.",
     );
   }
-  const lane = lookupBatchTokenLane(token);
+  const slot = lookupLiveBatchSlot(batchId);
+  const lane = slot !== null ? slot.lane : NoLane;
   const prevTransition = ReactSharedInternals.T;
   const previousPriority = getCurrentUpdatePriority();
   // Save/restore unconditionally: nested runInBatch calls compose, with the
@@ -976,7 +982,7 @@ function runInBatchImpl<R>(token: number, fn: () => R): R {
   // not leak an outer call's deferred pin into transitions started inside.
   const previousRunInBatchLane = setRunInBatchTransitionLane(NoLane);
   try {
-    if (lane !== NoLane && (token & 1) === 1) {
+    if (slot !== null && lane !== NoLane && slot.deferred) {
       // Live deferred batch: pin the transition lane and enter a transition
       // scope shaped like startTransition's (ReactFiberHooks), so
       // requestUpdateLane takes the transition path for every update in fn.
@@ -998,7 +1004,7 @@ function runInBatchImpl<R>(token: number, fn: () => R): R {
       }
       ReactSharedInternals.T = transition;
     } else {
-      // Live urgent batch: the lane it was minted from. Retired or unknown
+      // Live urgent batch: the lane it was created on. Retired or unknown
       // (lane === NoLane): the documented urgent fallback.
       setCurrentUpdatePriority(
         lane !== NoLane ? lanesToEventPriority(lane) : DiscreteEventPriority,
@@ -1956,7 +1962,7 @@ function markRootUpdated(root: FiberRoot, updatedLanes: Lanes) {
   _markRootUpdated(root, updatedLanes);
 
   // External-runtime batch registry (pending edge): one array load + null
-  // check when no external write minted a token for this lane.
+  // check when no external write created a batch id for this lane.
   batchRegistryOnRootUpdated(root, updatedLanes);
 
   if (enableInfiniteRenderLoopDetection) {
@@ -4018,7 +4024,7 @@ function commitRoot(
   notifyRenderPassCommitted(root);
 
   // External-runtime batch registry (finish edge): lanes leaving
-  // root.pendingLanes retire their batch tokens, exactly once, at the same
+  // root.pendingLanes retire their batches, exactly once, at the same
   // moment React's own books change.
   batchRegistryOnRootFinished(
     root,
