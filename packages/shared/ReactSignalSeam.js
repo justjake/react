@@ -24,7 +24,11 @@ export type SignalSeamRuntime = {
   onPassStart: (container: mixed, lanes: number) => void,
   // A pass on `container` committed `lanes`; `remainingLanes` still hold
   // pending work afterwards.
-  onPassCommit: (container: mixed, lanes: number, remainingLanes: number) => void,
+  onPassCommit: (
+    container: mixed,
+    lanes: number,
+    remainingLanes: number,
+  ) => void,
   // Brackets exactly React's DOM mutation phase for a commit on `container`.
   onMutationPhase: (phase: 'start' | 'stop', container: mixed) => void,
 };
@@ -99,7 +103,10 @@ export function emitPassCommit(
   }
 }
 
-export function emitMutationPhase(phase: 'start' | 'stop', container: mixed): void {
+export function emitMutationPhase(
+  phase: 'start' | 'stop',
+  container: mixed,
+): void {
   if (runtime !== null) {
     runtime.onMutationPhase(phase, container);
   }

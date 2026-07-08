@@ -882,7 +882,10 @@ installSignalSeamProvider({
       return (pickArbitraryLane(workInProgressRootRenderLanes): any);
     }
     const transition = requestCurrentTransition();
-    if (transition !== null && !(enableGestureTransition && transition.gesture)) {
+    if (
+      transition !== null &&
+      !(enableGestureTransition && transition.gesture)
+    ) {
       return (requestTransitionLane(transition): any);
     }
     return (eventPriorityToLane(resolveUpdatePriority()): any);
