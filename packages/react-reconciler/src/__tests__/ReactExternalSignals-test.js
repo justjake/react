@@ -12,7 +12,11 @@
 
 let React;
 let ReactNoop;
+let Scheduler;
 let act;
+let waitFor;
+let waitForAll;
+let assertLog;
 let protocol;
 
 describe('external signals protocol', () => {
@@ -20,7 +24,12 @@ describe('external signals protocol', () => {
     jest.resetModules();
     React = require('react');
     ReactNoop = require('react-noop-renderer');
-    act = require('internal-test-utils').act;
+    Scheduler = require('scheduler');
+    const InternalTestUtils = require('internal-test-utils');
+    act = InternalTestUtils.act;
+    waitFor = InternalTestUtils.waitFor;
+    waitForAll = InternalTestUtils.waitForAll;
+    assertLog = InternalTestUtils.assertLog;
     protocol =
       React.__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE.L;
   });
@@ -77,6 +86,47 @@ describe('external signals protocol', () => {
     const commit = events.filter(event => event.type === 'commit').pop();
     expect(commit.lanes & lane).toBe(lane);
     stop();
+  });
+
+  it('lets urgent work interrupt a lane-pinned correction', async () => {
+    let updateSlow;
+    let updateUrgent;
+    function Text({text}) {
+      Scheduler.log(text);
+      return text;
+    }
+    function App() {
+      const [slow, setSlow] = React.useState(0);
+      const [urgent, setUrgent] = React.useState(0);
+      updateSlow = setSlow;
+      updateUrgent = setUrgent;
+      React.useLayoutEffect(() => Scheduler.log('Commit'));
+      return (
+        <>
+          <Text text={'Slow: ' + slow} />
+          {slow === 1 ? (
+            <>
+              <Text text="A" />
+              <Text text="B" />
+              <Text text="C" />
+            </>
+          ) : null}
+          <Text text={'Urgent: ' + urgent} />
+        </>
+      );
+    }
+    const root = ReactNoop.createRoot();
+    await act(() => root.render(<App />));
+    assertLog(['Slow: 0', 'Urgent: 0', 'Commit']);
+    let lane;
+    React.startTransition(() => {
+      lane = protocol.getWriteLane();
+    });
+    protocol.runInLane(lane, () => updateSlow(1));
+    await waitFor(['Slow: 1', 'A']);
+    ReactNoop.flushSync(() => updateUrgent(1));
+    assertLog(['Slow: 0', 'Urgent: 1', 'Commit']);
+    await waitForAll(['Slow: 1', 'A', 'B', 'C', 'Urgent: 1', 'Commit']);
   });
 
   it('brackets the host mutation phase', async () => {
