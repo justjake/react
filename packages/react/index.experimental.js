@@ -56,6 +56,11 @@ export {
   useSyncExternalStore,
   useTransition,
   useActionState,
+  unstable_subscribeToSignalRuntime,
+  unstable_getCurrentSignalWriteLane,
+  unstable_isCurrentSignalWriteDeferred,
+  unstable_getSignalRenderContext,
+  unstable_runWithSignalLane,
   version,
 } from './src/ReactClient';
 

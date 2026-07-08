@@ -21,12 +21,41 @@ type onStartGestureTransitionFinish = (
   ?GestureOptions,
 ) => () => void;
 
+export type SignalRenderContext = {
+  container: mixed,
+  lanes: number,
+};
+
+export type SignalRuntimeListener = {
+  onRenderStart?: (container: mixed, lanes: number) => void,
+  onRenderStop?: (
+    container: mixed,
+    lanes: number,
+    committed: boolean,
+    remainingLanes: number,
+  ) => void,
+  onCommitStart?: (container: mixed, lanes: number) => void,
+  onCommitStop?: (
+    container: mixed,
+    lanes: number,
+    remainingLanes: number,
+  ) => void,
+  onMutationStart?: (container: mixed) => void,
+  onMutationStop?: (container: mixed) => void,
+};
+
 export type SharedStateClient = {
   H: null | Dispatcher, // ReactCurrentDispatcher for Hooks
   A: null | AsyncDispatcher, // ReactCurrentCache for Cache
   T: null | Transition, // ReactCurrentBatchConfig for Transitions
   S: null | onStartTransitionFinish,
   G: null | onStartGestureTransitionFinish,
+  signalRuntime: {
+    listener: null | SignalRuntimeListener,
+    pinnedLane: number,
+    getWriteLane: null | (() => number),
+    getRenderContext: null | (() => SignalRenderContext | null),
+  },
 
   // DEV-only
 
@@ -62,6 +91,12 @@ const ReactSharedInternals: SharedStateClient = {
   A: null,
   T: null,
   S: null,
+  signalRuntime: {
+    listener: null,
+    pinnedLane: 0,
+    getWriteLane: null,
+    getRenderContext: null,
+  },
 } as any;
 if (enableGestureTransition) {
   ReactSharedInternals.G = null;

@@ -439,6 +439,22 @@ let workInProgressRoot: FiberRoot | null = null;
 let workInProgress: Fiber | null = null;
 // The lanes we're rendering
 let workInProgressRootRenderLanes: Lanes = NoLanes;
+let signalRenderRoot: FiberRoot | null = null;
+let signalRenderLanes: Lanes = NoLanes;
+let signalRenderContext = null;
+
+ReactSharedInternals.signalRuntime.getWriteLane = function (): Lane {
+  const transition = requestCurrentTransition();
+  return transition === null
+    ? eventPriorityToLane(resolveUpdatePriority())
+    : requestTransitionLane(transition);
+};
+ReactSharedInternals.signalRuntime.getRenderContext = function () {
+  return (executionContext & RenderContext) === NoContext ||
+    workInProgressRoot === null
+    ? null
+    : signalRenderContext;
+};
 
 export opaque type SuspendedReason = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
 const NotSuspended: SuspendedReason = 0;
@@ -808,6 +824,9 @@ export function getCurrentTime(): number {
 }
 
 export function requestUpdateLane(fiber: Fiber): Lane {
+  const pinnedLane = ReactSharedInternals.signalRuntime.pinnedLane;
+  if (pinnedLane !== NoLane) return pinnedLane;
+
   // Special cases
   const mode = fiber.mode;
   if (!disableLegacyMode && (mode & ConcurrentMode) === NoMode) {
@@ -2257,6 +2276,23 @@ function prepareFreshStack(root: FiberRoot, lanes: Lanes): Fiber {
   workInProgressRootConcurrentErrors = null;
   workInProgressRootRecoverableErrors = null;
   workInProgressRootDidIncludeRecursiveRenderUpdate = false;
+
+  const previousSignalRoot = signalRenderRoot;
+  if (previousSignalRoot !== null) {
+    ReactSharedInternals.signalRuntime.listener?.onRenderStop?.(
+      previousSignalRoot.containerInfo,
+      signalRenderLanes,
+      false,
+      previousSignalRoot.pendingLanes,
+    );
+  }
+  signalRenderRoot = root;
+  signalRenderLanes = lanes;
+  signalRenderContext = {container: root.containerInfo, lanes};
+  ReactSharedInternals.signalRuntime.listener?.onRenderStart?.(
+    root.containerInfo,
+    lanes,
+  );
 
   // Get the lanes that are entangled with whatever we're about to render. We
   // track these separately so we can distinguish the priority of the render
@@ -3751,6 +3787,11 @@ function commitRoot(
     suspendedRetryLanes,
   );
 
+  ReactSharedInternals.signalRuntime.listener?.onCommitStart?.(
+    root.containerInfo,
+    lanes,
+  );
+
   // Reset this before firing side effects so we can detect recursive updates.
   didIncludeCommitPhaseUpdate = false;
 
@@ -4001,6 +4042,9 @@ function flushMutationEffects(): void {
   const root = pendingEffectsRoot;
   const finishedWork = pendingFinishedWork;
   const lanes = pendingEffectsLanes;
+  ReactSharedInternals.signalRuntime.listener?.onMutationStart?.(
+    root.containerInfo,
+  );
   const subtreeMutationHasEffects =
     (finishedWork.subtreeFlags & MutationMask) !== NoFlags;
   const rootMutationHasEffect = (finishedWork.flags & MutationMask) !== NoFlags;
@@ -4029,6 +4073,10 @@ function flushMutationEffects(): void {
       ReactSharedInternals.T = prevTransition;
     }
   }
+
+  ReactSharedInternals.signalRuntime.listener?.onMutationStop?.(
+    root.containerInfo,
+  );
 
   // The work-in-progress tree is now the current tree. This must come after
   // the mutation phase, so that the previous tree is still current during
@@ -4132,6 +4180,23 @@ function flushLayoutEffects(): void {
       pendingDelayedCommitReason === ABORTED_VIEW_TRANSITION_COMMIT,
       workInProgressUpdateTask,
     );
+  }
+
+  ReactSharedInternals.signalRuntime.listener?.onRenderStop?.(
+    root.containerInfo,
+    lanes,
+    true,
+    root.pendingLanes,
+  );
+  ReactSharedInternals.signalRuntime.listener?.onCommitStop?.(
+    root.containerInfo,
+    lanes,
+    root.pendingLanes,
+  );
+  if (signalRenderRoot === root && signalRenderLanes === lanes) {
+    signalRenderRoot = null;
+    signalRenderLanes = NoLanes;
+    signalRenderContext = null;
   }
 
   pendingEffectsStatus = PENDING_AFTER_MUTATION_PHASE;

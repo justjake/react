@@ -64,6 +64,13 @@ import {addTransitionType} from './ReactTransitionType';
 import {act} from './ReactAct';
 import {captureOwnerStack} from './ReactOwnerStack';
 import * as ReactCompilerRuntime from './ReactCompilerRuntime';
+import {
+  subscribeToSignalRuntime,
+  getCurrentSignalWriteLane,
+  isCurrentSignalWriteDeferred,
+  getSignalRenderContext,
+  runWithSignalLane,
+} from './ReactSignalRuntime';
 
 const Children = {
   map,
@@ -134,4 +141,9 @@ export {
   useId,
   act,
   captureOwnerStack,
+  subscribeToSignalRuntime as unstable_subscribeToSignalRuntime,
+  getCurrentSignalWriteLane as unstable_getCurrentSignalWriteLane,
+  isCurrentSignalWriteDeferred as unstable_isCurrentSignalWriteDeferred,
+  getSignalRenderContext as unstable_getSignalRenderContext,
+  runWithSignalLane as unstable_runWithSignalLane,
 };
