@@ -49,6 +49,7 @@ function findDOMNode(
 // Expose findDOMNode on internals
 Internals.findDOMNode = findDOMNode;
 
+export {unstable_externalSignals} from './ReactDOMExternalSignals';
 export {ReactVersion as version, createRoot, hydrateRoot};
 
 const foundDevTools = injectIntoDevTools();

@@ -405,6 +405,12 @@ import {
   flushSyncWorkOnLegacyRootsOnly,
   requestTransitionLane,
 } from './ReactFiberRootScheduler';
+import {
+  externalSignalsPassStarted,
+  externalSignalsPassDiscarded,
+  externalSignalsCommitPhase,
+  getForcedExternalLane,
+} from './ReactFiberExternalSignals';
 import {getMaskedContext, getUnmaskedContext} from './ReactFiberLegacyContext';
 import {logUncaughtError} from './ReactFiberErrorLogger';
 import {
@@ -808,6 +814,13 @@ export function getCurrentTime(): number {
 }
 
 export function requestUpdateLane(fiber: Fiber): Lane {
+  // An external store scheduling a corrective re-render into a live batch
+  // pins that batch's lane for the duration of the dispatch.
+  const forcedExternalLane = getForcedExternalLane();
+  if (forcedExternalLane !== NoLane) {
+    return forcedExternalLane;
+  }
+
   // Special cases
   const mode = fiber.mode;
   if (!disableLegacyMode && (mode & ConcurrentMode) === NoMode) {
@@ -2007,6 +2020,17 @@ function finalizeRender(lanes: Lanes, finalizationTime: number): void {
 }
 
 function prepareFreshStack(root: FiberRoot, lanes: Lanes): Fiber {
+  // Render identity for external stores: a fresh stack is a new render
+  // pass; an existing work-in-progress tree thrown away here was a pass
+  // that will never commit.
+  if (workInProgress !== null && workInProgressRoot !== null) {
+    externalSignalsPassDiscarded(
+      workInProgressRoot,
+      workInProgressRootRenderLanes,
+    );
+  }
+  externalSignalsPassStarted(root, lanes);
+
   if (enableProfilerTimer && enableComponentPerformanceTrack) {
     // The order of tracks within a group are determined by the earliest start time.
     // Are tracks should show up in priority order and we should ideally always show
@@ -4005,6 +4029,11 @@ function flushMutationEffects(): void {
     (finishedWork.subtreeFlags & MutationMask) !== NoFlags;
   const rootMutationHasEffect = (finishedWork.flags & MutationMask) !== NoFlags;
 
+  // The external-signals mutation window brackets exactly React's own DOM
+  // mutation phase: nothing React does to the host tree happens outside
+  // these two edges, and layout/passive effects happen after the stop edge.
+  externalSignalsCommitPhase(root, 'mutation-start', lanes);
+
   if (subtreeMutationHasEffects || rootMutationHasEffect) {
     const prevTransition = ReactSharedInternals.T;
     ReactSharedInternals.T = null;
@@ -4030,11 +4059,18 @@ function flushMutationEffects(): void {
     }
   }
 
+  externalSignalsCommitPhase(root, 'mutation-stop', lanes);
+
   // The work-in-progress tree is now the current tree. This must come after
   // the mutation phase, so that the previous tree is still current during
   // componentWillUnmount, but before the layout phase, so that the finished
   // work is current during componentDidMount/Update.
   root.current = finishedWork;
+
+  // The committed edge: the finished lanes' external batches retire here,
+  // before layout effects run, so effects observe post-retirement state.
+  externalSignalsCommitPhase(root, 'committed', lanes);
+
   pendingEffectsStatus = PENDING_LAYOUT_PHASE;
 }
 
