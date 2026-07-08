@@ -228,6 +228,12 @@ import {
   eventPriorityToLane,
 } from './ReactEventPriorities';
 import {requestCurrentTransition} from './ReactFiberTransition';
+import signalSeam, {
+  onSignalPassStart,
+  onSignalRootUpdated,
+  onSignalCommit,
+  onSignalMutation,
+} from './ReactFiberSignalSeam';
 import {
   SelectiveHydrationException,
   beginWork,
@@ -852,6 +858,31 @@ export function requestUpdateLane(fiber: Fiber): Lane {
 
   return eventPriorityToLane(resolveUpdatePriority());
 }
+
+// Signal-seam queries (see ReactFiberSignalSeam). The write cascade mirrors
+// requestUpdateLane minus the fiber-specific cases: an external store write
+// has no fiber, and a write during render is the runtime's own error to
+// raise, so the query only answers "which transition lane, if any".
+signalSeam.getWriteLane = function (): Lane {
+  const transition = requestCurrentTransition();
+  if (
+    transition !== null &&
+    !(enableGestureTransition && (transition: any).gesture)
+  ) {
+    return requestTransitionLane(transition);
+  }
+  return NoLane;
+};
+
+signalSeam.getRenderContainer = function (): mixed {
+  if (
+    (executionContext & RenderContext) !== NoContext &&
+    workInProgressRoot !== null
+  ) {
+    return workInProgressRoot.containerInfo;
+  }
+  return null;
+};
 
 function requestRetryLane(fiber: Fiber) {
   // This is a fork of `requestUpdateLane` designed specifically for Suspense
@@ -1754,6 +1785,9 @@ function isRenderConsistentWithExternalStores(finishedWork: Fiber): boolean {
 function markRootUpdated(root: FiberRoot, updatedLanes: Lanes) {
   _markRootUpdated(root, updatedLanes);
 
+  // Signal seam: pending edge — the runtime learns which roots carry a lane.
+  onSignalRootUpdated(root, updatedLanes);
+
   if (enableInfiniteRenderLoopDetection) {
     // Check for recursive updates
     if (executionContext & RenderContext) {
@@ -2268,6 +2302,11 @@ function prepareFreshStack(root: FiberRoot, lanes: Lanes): Fiber {
   entangledRenderLanes = getEntangledLanes(root, lanes);
 
   finishQueueingConcurrentUpdates();
+
+  // Signal seam: a fresh stack starts (or, for NoLanes, resets) this root's
+  // render pass. After the concurrent update queue drained, so the runtime
+  // latches a consistent cutoff for the pass's world.
+  onSignalPassStart(root, lanes === NoLanes ? NoLanes : entangledRenderLanes);
 
   if (__DEV__) {
     resetOwnerStackLimit();
@@ -3742,6 +3781,11 @@ function commitRoot(
     remainingLanes &= ~GestureLane;
   }
 
+  // Signal seam: the write set this commit makes visible spans the finished
+  // lanes plus what they were entangled with. Capture before markRootFinished
+  // clears the entanglement bookkeeping.
+  const signalCommittedLanes = mergeLanes(lanes, getEntangledLanes(root, lanes));
+
   markRootFinished(
     root,
     lanes,
@@ -3750,6 +3794,10 @@ function commitRoot(
     updatedLanes,
     suspendedRetryLanes,
   );
+
+  // Signal seam: finish edge — lanes leaving root.pendingLanes retire their
+  // batches exactly once, at the same moment React's own books change.
+  onSignalCommit(root, signalCommittedLanes, root.pendingLanes);
 
   // Reset this before firing side effects so we can detect recursive updates.
   didIncludeCommitPhaseUpdate = false;
@@ -4012,6 +4060,10 @@ function flushMutationEffects(): void {
     setCurrentUpdatePriority(DiscreteEventPriority);
     const prevExecutionContext = executionContext;
     executionContext |= CommitContext;
+    // Signal seam: bracket exactly the window in which React mutates the
+    // host tree, so a MutationObserver client can ignore React's own
+    // mutations while still catching third-party ones.
+    onSignalMutation(root, true);
     try {
       // The next phase is the mutation phase, where we mutate the host tree.
       commitMutationEffects(root, finishedWork, lanes);
@@ -4023,6 +4075,7 @@ function flushMutationEffects(): void {
       }
       resetAfterCommit(root.containerInfo);
     } finally {
+      onSignalMutation(root, false);
       // Reset the priority to the previous non-sync value.
       executionContext = prevExecutionContext;
       setCurrentUpdatePriority(previousPriority);

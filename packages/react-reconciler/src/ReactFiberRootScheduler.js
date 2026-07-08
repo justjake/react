@@ -82,6 +82,7 @@ import {
   syncNestedUpdateFlag,
 } from './ReactProfilerTimer';
 import {peekEntangledActionLane} from './ReactFiberAsyncAction';
+import signalSeam from './ReactFiberSignalSeam';
 
 import noop from 'shared/noop';
 import reportGlobalError from 'shared/reportGlobalError';
@@ -708,6 +709,12 @@ export function requestTransitionLane(
   // The trick we use is to cache the first of each of these inputs within an
   // event. Then reset the cached values once we can be sure the event is
   // over. Our heuristic for that is whenever we enter a concurrent work loop.
+  // Signal seam: a runtime pinning a corrective update to a live batch's
+  // lane wins over the per-event lane, so the update commits with its batch.
+  const pinnedLane = signalSeam.pinnedTransitionLane;
+  if (pinnedLane !== NoLane) {
+    return pinnedLane;
+  }
   if (currentEventTransitionLane === NoLane) {
     // All transitions within the same event are assigned the same lane.
     const actionScopeLane = peekEntangledActionLane();
