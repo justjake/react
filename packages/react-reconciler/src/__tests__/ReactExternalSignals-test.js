@@ -54,6 +54,7 @@ describe('external signals protocol', () => {
     expect(events.map(event => `${event.type}:${event.phase || ''}`)).toEqual(
       expect.arrayContaining(['pass:start', 'pass:commit', 'commit:']),
     );
+    expect(events.find(event => event.type === 'commit').finished).not.toBe(0);
     stop();
   });
 

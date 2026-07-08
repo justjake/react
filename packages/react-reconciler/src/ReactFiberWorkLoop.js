@@ -536,6 +536,7 @@ type ExternalSignalEvent = {
   container: mixed,
   lanes?: Lanes,
   pending?: Lanes,
+  finished?: Lanes,
 };
 
 const externalSignalListeners: Set<(ExternalSignalEvent) => void> = new Set();
@@ -3814,6 +3815,7 @@ function commitRoot(
   }
 
   const externalSignalCommittedLanes = getEntangledLanes(root, lanes);
+  const externalSignalPreviouslyPendingLanes = root.pendingLanes;
 
   markRootFinished(
     root,
@@ -3836,6 +3838,7 @@ function commitRoot(
     container: root.containerInfo,
     lanes: externalSignalCommittedLanes,
     pending: root.pendingLanes,
+    finished: externalSignalPreviouslyPendingLanes & ~root.pendingLanes,
   });
 
   // Reset this before firing side effects so we can detect recursive updates.
