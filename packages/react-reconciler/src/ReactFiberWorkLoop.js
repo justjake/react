@@ -4001,6 +4001,11 @@ function flushMutationEffects(): void {
   const root = pendingEffectsRoot;
   const finishedWork = pendingFinishedWork;
   const lanes = pendingEffectsLanes;
+  // External-state mutation window: brackets exactly this commit's host
+  // mutation phase, so an installed runtime can blind DOM observers to
+  // React's own mutations while still seeing everyone else's.
+  const mutationWindow = (globalThis as any).__FX2_MUTATION_WINDOW__;
+  if (mutationWindow != null) mutationWindow(root.containerInfo, true);
   const subtreeMutationHasEffects =
     (finishedWork.subtreeFlags & MutationMask) !== NoFlags;
   const rootMutationHasEffect = (finishedWork.flags & MutationMask) !== NoFlags;
@@ -4029,6 +4034,8 @@ function flushMutationEffects(): void {
       ReactSharedInternals.T = prevTransition;
     }
   }
+
+  if (mutationWindow != null) mutationWindow(root.containerInfo, false);
 
   // The work-in-progress tree is now the current tree. This must come after
   // the mutation phase, so that the previous tree is still current during
@@ -5667,3 +5674,7 @@ export function setIsRunningInsertionEffect(isRunning: boolean): void {
     isRunningInsertionEffect = isRunning;
   }
 }
+
+// Handshake for external-state runtimes: presence (value 1) means this build
+// consumes __FX2_MUTATION_WINDOW__; registration fails loudly without it.
+(globalThis as any).__FX2_REACT_PROTOCOL__ = 1;
