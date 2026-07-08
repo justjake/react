@@ -85,6 +85,10 @@ export function signalCommit(root: FiberRoot, lanes: Lanes): void {
   const batches = renderedBatches.get(root) || batchesFor(lanes);
   renderedBatches.delete(root);
   if (runtime !== null) runtime.commit(root.containerInfo, batches);
+  let lane = 1;
+  for (let index = 0; index < 31; index++, lane *= 2) {
+    if ((lanes & lane) !== 0) batchesByLane[index] = 0;
+  }
 }
 
 export function signalMutation(root: FiberRoot, start: boolean): void {
