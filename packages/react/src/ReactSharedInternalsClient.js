@@ -85,4 +85,48 @@ if (__DEV__) {
   ReactSharedInternals.recentlyCreatedOwnerStacks = 0;
 }
 
+export const unstable_Signals = {
+  register(runtime) {
+    const current = ReactSharedInternals.X;
+    if (current !== null && current !== runtime) {
+      throw new Error(
+        'A different external signal runtime is already registered.',
+      );
+    }
+    ReactSharedInternals.X = runtime;
+    return () => {
+      if (ReactSharedInternals.X === runtime) ReactSharedInternals.X = null;
+    };
+  },
+  run(batch, fn) {
+    const previous = ReactSharedInternals.B;
+    ReactSharedInternals.B = batch;
+    try {
+      return fn();
+    } finally {
+      ReactSharedInternals.B = previous;
+    }
+  },
+  world() {
+    return ReactSharedInternals.R;
+  },
+  urgent(fn) {
+    const transition = ReactSharedInternals.T;
+    const batch = ReactSharedInternals.B;
+    ReactSharedInternals.T = null;
+    ReactSharedInternals.B = 0;
+    try {
+      return fn();
+    } finally {
+      ReactSharedInternals.T = transition;
+      ReactSharedInternals.B = batch;
+    }
+  },
+  reset() {
+    ReactSharedInternals.X = null;
+    ReactSharedInternals.B = 0;
+    ReactSharedInternals.R = null;
+  },
+};
+
 export default ReactSharedInternals;
