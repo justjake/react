@@ -820,7 +820,7 @@ export function requestUpdateLane(fiber: Fiber): Lane {
   // beside it.
   const seamPinnedLane = getPinnedLane();
   if (seamPinnedLane !== NoLane) {
-    return (seamPinnedLane: any);
+    return seamPinnedLane as any;
   }
   // Special cases
   const mode = fiber.mode;
@@ -879,16 +879,16 @@ installSignalSeamProvider({
       (executionContext & RenderContext) !== NoContext &&
       workInProgressRootRenderLanes !== NoLanes
     ) {
-      return (pickArbitraryLane(workInProgressRootRenderLanes): any);
+      return pickArbitraryLane(workInProgressRootRenderLanes) as any;
     }
     const transition = requestCurrentTransition();
     if (
       transition !== null &&
       !(enableGestureTransition && transition.gesture)
     ) {
-      return (requestTransitionLane(transition): any);
+      return requestTransitionLane(transition) as any;
     }
-    return (eventPriorityToLane(resolveUpdatePriority()): any);
+    return eventPriorityToLane(resolveUpdatePriority()) as any;
   },
   currentRenderInfo(): null | {container: mixed, lanes: number} {
     if (
@@ -898,7 +898,7 @@ installSignalSeamProvider({
     ) {
       return {
         container: workInProgressRoot.containerInfo,
-        lanes: (workInProgressRootRenderLanes: any),
+        lanes: workInProgressRootRenderLanes as any,
       };
     }
     return null;
@@ -2324,7 +2324,7 @@ function prepareFreshStack(root: FiberRoot, lanes: Lanes): Fiber {
   // Signal seam: a fresh stack begins (or, for NoLanes, resets) the render
   // pass on this root. Fires after the update queue drained so the runtime
   // observes a consistent world when it pins the pass's snapshot.
-  emitPassStart(root.containerInfo, (lanes: any));
+  emitPassStart(root.containerInfo, lanes as any);
 
   if (__DEV__) {
     resetOwnerStackLimit();
@@ -3811,7 +3811,7 @@ function commitRoot(
   // Signal seam: this commit makes `lanes` visible on this root; the runtime
   // retires the batches those lanes carried and advances its per-root
   // committed view.
-  emitPassCommit(root.containerInfo, (lanes: any), (root.pendingLanes: any));
+  emitPassCommit(root.containerInfo, lanes as any, root.pendingLanes as any);
 
   // Reset this before firing side effects so we can detect recursive updates.
   didIncludeCommitPhaseUpdate = false;
