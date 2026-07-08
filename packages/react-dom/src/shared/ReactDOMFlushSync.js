@@ -20,6 +20,8 @@ function flushSyncImpl<R>(fn: (() => R) | void): R | void {
   const previousTransition = ReactSharedInternals.T;
   const previousUpdatePriority =
     ReactDOMSharedInternals.p; /* ReactDOMCurrentUpdatePriority */
+  const signalRuntime = ReactSharedInternals.X;
+  if (signalRuntime !== null) signalRuntime.flush(true);
 
   try {
     ReactSharedInternals.T = null;
@@ -31,6 +33,7 @@ function flushSyncImpl<R>(fn: (() => R) | void): R | void {
       return undefined;
     }
   } finally {
+    if (signalRuntime !== null) signalRuntime.flush(false);
     ReactSharedInternals.T = previousTransition;
     ReactDOMSharedInternals.p /* ReactDOMCurrentUpdatePriority */ =
       previousUpdatePriority;
