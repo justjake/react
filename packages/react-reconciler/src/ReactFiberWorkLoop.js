@@ -862,7 +862,7 @@ export function requestUpdateLane(fiber: Fiber): Lane {
         : laneForSignalBatch(transition._signalBatch);
     const lane =
       pinnedLane === NoLane ? requestTransitionLane(transition) : pinnedLane;
-    claimSignalBatch(lane, transition);
+    claimSignalBatch(lane, transition, fiber);
     return lane;
   }
 

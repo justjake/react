@@ -7,13 +7,15 @@
  * @flow
  */
 
-import type {FiberRoot} from './ReactInternalTypes';
+import type {Fiber, FiberRoot} from './ReactInternalTypes';
 import type {Lanes, Lane} from './ReactFiberLane';
 import type {Transition} from 'react/src/ReactStartTransition';
 
 import ReactSharedInternals from 'shared/ReactSharedInternals';
+import {HostRoot} from './ReactWorkTags';
 
 const batchesByLane: Int32Array = new Int32Array(31);
+const rootBatchesByLane: Map<FiberRoot, Int32Array> = new Map();
 const renderedBatches: Map<FiberRoot, Array<number>> = new Map();
 
 export function laneForSignalBatch(batch: number): Lane {
@@ -34,11 +36,14 @@ ReactSharedInternals.P = function <T>(batch: number, scope: () => T): T {
   }
 };
 
-function batchesFor(lanes: Lanes): Array<number> {
+function batchesFor(lanes: Lanes, root?: FiberRoot): Array<number> {
   const result = [];
+  const batches =
+    root === undefined ? batchesByLane : rootBatchesByLane.get(root);
+  if (batches === undefined) return result;
   let lane = 1;
   for (let index = 0; index < 31; index++, lane *= 2) {
-    const batch = batchesByLane[index];
+    const batch = batches[index];
     if ((lanes & lane) !== 0 && batch !== 0 && result.indexOf(batch) < 0) {
       result.push(batch);
     }
@@ -46,13 +51,34 @@ function batchesFor(lanes: Lanes): Array<number> {
   return result;
 }
 
-export function claimSignalBatch(lane: Lane, transition: Transition): void {
+export function claimSignalBatch(
+  lane: Lane,
+  transition: Transition,
+  fiber: Fiber,
+): void {
   const batch = transition._signalBatch;
   if (batch === undefined) return;
   const index = 31 - Math.clz32(lane);
   batchesByLane[index] = batch;
   const runtime = ReactSharedInternals.R;
-  if (runtime !== null) runtime.batchScheduled(batch);
+  if (runtime !== null) {
+    let rootFiber = fiber;
+    while (rootFiber.return !== null) rootFiber = rootFiber.return;
+    const root: FiberRoot | void =
+      rootFiber.tag === HostRoot ? rootFiber.stateNode : undefined;
+    if (root !== undefined) {
+      let rootBatches = rootBatchesByLane.get(root);
+      if (rootBatches === undefined) {
+        rootBatches = new Int32Array(31);
+        rootBatchesByLane.set(root, rootBatches);
+      }
+      rootBatches[index] = batch;
+    }
+    runtime.batchScheduled(
+      batch,
+      root === undefined ? undefined : root.containerInfo,
+    );
+  }
 }
 
 export function signalRenderStart(root: FiberRoot, lanes: Lanes): void {
@@ -63,7 +89,7 @@ export function signalRenderStart(root: FiberRoot, lanes: Lanes): void {
     renderedBatches.delete(root);
     return;
   }
-  const batches = batchesFor(lanes);
+  const batches = batchesFor(lanes, root);
   renderedBatches.set(root, batches);
   if (runtime !== null) runtime.renderStart(root.containerInfo, batches);
 }
@@ -82,12 +108,16 @@ export function signalRenderEnd(completed: boolean): void {
 
 export function signalCommit(root: FiberRoot, lanes: Lanes): void {
   const runtime = ReactSharedInternals.R;
-  const batches = renderedBatches.get(root) || batchesFor(lanes);
+  const batches = renderedBatches.get(root) || batchesFor(lanes, root);
   renderedBatches.delete(root);
   if (runtime !== null) runtime.commit(root.containerInfo, batches);
+  const rootBatches = rootBatchesByLane.get(root);
   let lane = 1;
   for (let index = 0; index < 31; index++, lane *= 2) {
-    if ((lanes & lane) !== 0) batchesByLane[index] = 0;
+    if ((lanes & lane) !== 0) {
+      batchesByLane[index] = 0;
+      if (rootBatches !== undefined) rootBatches[index] = 0;
+    }
   }
 }
 
