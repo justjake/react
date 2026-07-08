@@ -1,0 +1,70 @@
+/**
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
+ *
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
+ *
+ * @emails react-core
+ * @jest-environment node
+ */
+
+'use strict';
+
+let React;
+let ReactNoop;
+let act;
+let protocol;
+
+describe('external signals protocol', () => {
+  beforeEach(() => {
+    jest.resetModules();
+    React = require('react');
+    ReactNoop = require('react-noop-renderer');
+    act = require('internal-test-utils').act;
+    protocol =
+      React.__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE.L;
+  });
+
+  it('classifies a transition and pins corrective updates to its lane', () => {
+    expect(protocol.version).toBe(1);
+    expect(protocol.getWriteLane()).toBe(0);
+    let lane;
+    React.startTransition(() => {
+      lane = protocol.getWriteLane();
+      expect(protocol.getWriteLane()).toBe(lane);
+    });
+    expect(lane).not.toBe(0);
+    protocol.runInLane(lane, () => {
+      expect(protocol.getWriteLane()).toBe(lane);
+    });
+  });
+
+  it('reports the render world and its commit disposition', async () => {
+    const events = [];
+    const stop = protocol.subscribe(event => events.push(event));
+    const root = ReactNoop.createRoot();
+    let context;
+    function App() {
+      context = protocol.getRenderContext();
+      return 'ok';
+    }
+    await act(() => root.render(<App />));
+    expect(context).not.toBe(null);
+    expect(context.lanes).not.toBe(0);
+    expect(events.map(event => `${event.type}:${event.phase || ''}`)).toEqual(
+      expect.arrayContaining(['pass:start', 'pass:commit', 'commit:']),
+    );
+    stop();
+  });
+
+  it('brackets the host mutation phase', async () => {
+    const phases = [];
+    const stop = protocol.subscribe(event => {
+      if (event.type === 'mutation') phases.push(event.phase);
+    });
+    const root = ReactNoop.createRoot();
+    await act(() => root.render(<span>A</span>));
+    expect(phases).toEqual(['start', 'stop']);
+    stop();
+  });
+});

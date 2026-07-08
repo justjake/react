@@ -112,6 +112,13 @@ let mightHavePendingSyncWork: boolean = false;
 let isFlushingWork: boolean = false;
 
 let currentEventTransitionLane: Lane = NoLane;
+let externalSignalLane: Lane = NoLane;
+
+export function setExternalSignalLane(lane: Lane): Lane {
+  const previous = externalSignalLane;
+  externalSignalLane = lane;
+  return previous;
+}
 
 export function ensureRootIsScheduled(root: FiberRoot): void {
   // This function is called whenever a root receives an update. It does two
@@ -701,6 +708,9 @@ export function requestTransitionLane(
   // TODO: Make this non-nullable. Requires a tweak to useOptimistic.
   transition: Transition | null,
 ): Lane {
+  if (externalSignalLane !== NoLane) {
+    return externalSignalLane;
+  }
   // The algorithm for assigning an update to a lane should be stable for all
   // updates at the same priority within the same event. To do this, the
   // inputs to the algorithm must be the same.

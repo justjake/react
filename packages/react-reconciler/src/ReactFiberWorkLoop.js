@@ -404,6 +404,7 @@ import {
   flushSyncWorkOnAllRoots,
   flushSyncWorkOnLegacyRootsOnly,
   requestTransitionLane,
+  setExternalSignalLane,
 } from './ReactFiberRootScheduler';
 import {getMaskedContext, getUnmaskedContext} from './ReactFiberLegacyContext';
 import {logUncaughtError} from './ReactFiberErrorLogger';
@@ -528,6 +529,56 @@ const FALLBACK_THROTTLE_MS: number = 300;
 // The absolute time for when we should start giving up on rendering
 // more and prefer CPU suspense heuristics instead.
 let workInProgressRootRenderTargetTime: number = Infinity;
+
+type ExternalSignalEvent = {
+  type: 'pass' | 'commit' | 'mutation',
+  phase?: 'start' | 'stop' | 'commit' | 'discard',
+  container: mixed,
+  lanes?: Lanes,
+  pending?: Lanes,
+};
+
+const externalSignalListeners: Set<(ExternalSignalEvent) => void> = new Set();
+const externalSignalPasses: WeakMap<FiberRoot, Lanes> = new WeakMap();
+
+function emitExternalSignalEvent(event: ExternalSignalEvent): void {
+  externalSignalListeners.forEach(listener => listener(event));
+}
+
+ReactSharedInternals.L = {
+  version: 1,
+  subscribe(listener: ExternalSignalEvent => void): () => void {
+    externalSignalListeners.add(listener);
+    return () => externalSignalListeners.delete(listener);
+  },
+  getWriteLane(): Lane {
+    if ((executionContext & RenderContext) !== NoContext) {
+      throw new Error('External signals cannot be written during render.');
+    }
+    const transition = requestCurrentTransition();
+    return transition === null ? NoLane : requestTransitionLane(transition);
+  },
+  getRenderContext(): null | {container: mixed, lanes: Lanes} {
+    return (executionContext & RenderContext) !== NoContext &&
+      workInProgressRoot !== null
+      ? {
+          container: workInProgressRoot.containerInfo,
+          lanes: entangledRenderLanes,
+        }
+      : null;
+  },
+  runInLane<R>(lane: Lane, fn: () => R): R {
+    const previousLane = setExternalSignalLane(lane);
+    const previousTransition = ReactSharedInternals.T;
+    ReactSharedInternals.T = {_updatedFibers: new Set()} as any;
+    try {
+      return fn();
+    } finally {
+      ReactSharedInternals.T = previousTransition;
+      setExternalSignalLane(previousLane);
+    }
+  },
+};
 // How long a render is supposed to take before we start following CPU
 // suspense heuristics and opt out of rendering more content.
 const RENDER_TIMEOUT_MS = 500;
@@ -2269,6 +2320,26 @@ function prepareFreshStack(root: FiberRoot, lanes: Lanes): Fiber {
 
   finishQueueingConcurrentUpdates();
 
+  const previousSignalPass = externalSignalPasses.get(root);
+  if (previousSignalPass !== undefined) {
+    emitExternalSignalEvent({
+      type: 'pass',
+      phase: 'discard',
+      container: root.containerInfo,
+      lanes: previousSignalPass,
+    });
+    externalSignalPasses.delete(root);
+  }
+  if (lanes !== NoLanes) {
+    externalSignalPasses.set(root, entangledRenderLanes);
+    emitExternalSignalEvent({
+      type: 'pass',
+      phase: 'start',
+      container: root.containerInfo,
+      lanes: entangledRenderLanes,
+    });
+  }
+
   if (__DEV__) {
     resetOwnerStackLimit();
 
@@ -3742,6 +3813,8 @@ function commitRoot(
     remainingLanes &= ~GestureLane;
   }
 
+  const externalSignalCommittedLanes = getEntangledLanes(root, lanes);
+
   markRootFinished(
     root,
     lanes,
@@ -3750,6 +3823,20 @@ function commitRoot(
     updatedLanes,
     suspendedRetryLanes,
   );
+
+  externalSignalPasses.delete(root);
+  emitExternalSignalEvent({
+    type: 'pass',
+    phase: 'commit',
+    container: root.containerInfo,
+    lanes: externalSignalCommittedLanes,
+  });
+  emitExternalSignalEvent({
+    type: 'commit',
+    container: root.containerInfo,
+    lanes: externalSignalCommittedLanes,
+    pending: root.pendingLanes,
+  });
 
   // Reset this before firing side effects so we can detect recursive updates.
   didIncludeCommitPhaseUpdate = false;
@@ -4012,6 +4099,11 @@ function flushMutationEffects(): void {
     setCurrentUpdatePriority(DiscreteEventPriority);
     const prevExecutionContext = executionContext;
     executionContext |= CommitContext;
+    emitExternalSignalEvent({
+      type: 'mutation',
+      phase: 'start',
+      container: root.containerInfo,
+    });
     try {
       // The next phase is the mutation phase, where we mutate the host tree.
       commitMutationEffects(root, finishedWork, lanes);
@@ -4023,6 +4115,11 @@ function flushMutationEffects(): void {
       }
       resetAfterCommit(root.containerInfo);
     } finally {
+      emitExternalSignalEvent({
+        type: 'mutation',
+        phase: 'stop',
+        container: root.containerInfo,
+      });
       // Reset the priority to the previous non-sync value.
       executionContext = prevExecutionContext;
       setCurrentUpdatePriority(previousPriority);
