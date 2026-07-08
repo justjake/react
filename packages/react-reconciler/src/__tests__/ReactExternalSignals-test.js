@@ -58,6 +58,27 @@ describe('external signals protocol', () => {
     stop();
   });
 
+  it('commits a correction in the lane supplied by the caller', async () => {
+    const events = [];
+    const stop = protocol.subscribe(event => events.push(event));
+    const root = ReactNoop.createRoot();
+    let update;
+    function App() {
+      const [value, setValue] = React.useState(0);
+      update = setValue;
+      return value;
+    }
+    await act(() => root.render(<App />));
+    let lane;
+    React.startTransition(() => {
+      lane = protocol.getWriteLane();
+    });
+    await act(() => protocol.runInLane(lane, () => update(1)));
+    const commit = events.filter(event => event.type === 'commit').pop();
+    expect(commit.lanes & lane).toBe(lane);
+    stop();
+  });
+
   it('brackets the host mutation phase', async () => {
     const phases = [];
     const stop = protocol.subscribe(event => {
