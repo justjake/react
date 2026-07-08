@@ -8,3 +8,9 @@
  */
 
 export {createRoot, hydrateRoot, version} from './src/client/ReactDOMClient';
+export {
+  registerSignalSeamRuntime as unstable_registerSignalSeamRuntime,
+  signalSeamCurrentUpdateLane as unstable_currentUpdateLane,
+  signalSeamCurrentRenderInfo as unstable_currentRenderInfo,
+  runWithPinnedLane as unstable_runWithPinnedLane,
+} from 'shared/ReactSignalSeam';

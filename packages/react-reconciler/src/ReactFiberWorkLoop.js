@@ -408,6 +408,13 @@ import {
 import {getMaskedContext, getUnmaskedContext} from './ReactFiberLegacyContext';
 import {logUncaughtError} from './ReactFiberErrorLogger';
 import {
+  installSignalSeamProvider,
+  getPinnedLane,
+  emitPassStart,
+  emitPassCommit,
+  emitMutationPhase,
+} from 'shared/ReactSignalSeam';
+import {
   scheduleGestureCommit,
   stopCommittedGesture,
 } from './ReactFiberGestureScheduler';
@@ -808,6 +815,13 @@ export function getCurrentTime(): number {
 }
 
 export function requestUpdateLane(fiber: Fiber): Lane {
+  // A corrective update scheduled by the external signal runtime rides the
+  // lane of the batch it corrects, so it commits with that batch instead of
+  // beside it.
+  const seamPinnedLane = getPinnedLane();
+  if (seamPinnedLane !== NoLane) {
+    return (seamPinnedLane: any);
+  }
   // Special cases
   const mode = fiber.mode;
   if (!disableLegacyMode && (mode & ConcurrentMode) === NoMode) {
@@ -852,6 +866,41 @@ export function requestUpdateLane(fiber: Fiber): Lane {
 
   return eventPriorityToLane(resolveUpdatePriority());
 }
+
+// The signal seam provider: lane facts for the external signal runtime.
+// currentUpdateLane mirrors requestUpdateLane's cascade for updates that have
+// no fiber yet (an external write), so the runtime can attribute the write to
+// the same lane the subsequent setState calls will take. A gesture
+// transition is not schedulable external state; it classifies as a plain
+// event-priority update.
+installSignalSeamProvider({
+  currentUpdateLane(): number {
+    if (
+      (executionContext & RenderContext) !== NoContext &&
+      workInProgressRootRenderLanes !== NoLanes
+    ) {
+      return (pickArbitraryLane(workInProgressRootRenderLanes): any);
+    }
+    const transition = requestCurrentTransition();
+    if (transition !== null && !(enableGestureTransition && transition.gesture)) {
+      return (requestTransitionLane(transition): any);
+    }
+    return (eventPriorityToLane(resolveUpdatePriority()): any);
+  },
+  currentRenderInfo(): null | {container: mixed, lanes: number} {
+    if (
+      (executionContext & RenderContext) !== NoContext &&
+      workInProgressRoot !== null &&
+      workInProgressRootRenderLanes !== NoLanes
+    ) {
+      return {
+        container: workInProgressRoot.containerInfo,
+        lanes: (workInProgressRootRenderLanes: any),
+      };
+    }
+    return null;
+  },
+});
 
 function requestRetryLane(fiber: Fiber) {
   // This is a fork of `requestUpdateLane` designed specifically for Suspense
@@ -2268,6 +2317,11 @@ function prepareFreshStack(root: FiberRoot, lanes: Lanes): Fiber {
   entangledRenderLanes = getEntangledLanes(root, lanes);
 
   finishQueueingConcurrentUpdates();
+
+  // Signal seam: a fresh stack begins (or, for NoLanes, resets) the render
+  // pass on this root. Fires after the update queue drained so the runtime
+  // observes a consistent world when it pins the pass's snapshot.
+  emitPassStart(root.containerInfo, (lanes: any));
 
   if (__DEV__) {
     resetOwnerStackLimit();
@@ -3751,6 +3805,11 @@ function commitRoot(
     suspendedRetryLanes,
   );
 
+  // Signal seam: this commit makes `lanes` visible on this root; the runtime
+  // retires the batches those lanes carried and advances its per-root
+  // committed view.
+  emitPassCommit(root.containerInfo, (lanes: any), (root.pendingLanes: any));
+
   // Reset this before firing side effects so we can detect recursive updates.
   didIncludeCommitPhaseUpdate = false;
 
@@ -4012,6 +4071,10 @@ function flushMutationEffects(): void {
     setCurrentUpdatePriority(DiscreteEventPriority);
     const prevExecutionContext = executionContext;
     executionContext |= CommitContext;
+    // Signal seam: bracket exactly the window in which React mutates the
+    // host tree, so a MutationObserver client can ignore React's own
+    // mutations while still catching third-party ones.
+    emitMutationPhase('start', root.containerInfo);
     try {
       // The next phase is the mutation phase, where we mutate the host tree.
       commitMutationEffects(root, finishedWork, lanes);
@@ -4023,6 +4086,9 @@ function flushMutationEffects(): void {
       }
       resetAfterCommit(root.containerInfo);
     } finally {
+      // Closed in a finally so a mutation-phase error cannot leave observers
+      // permanently paused.
+      emitMutationPhase('stop', root.containerInfo);
       // Reset the priority to the previous non-sync value.
       executionContext = prevExecutionContext;
       setCurrentUpdatePriority(previousPriority);
