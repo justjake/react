@@ -157,4 +157,18 @@ describe('ReactFiberSignalRuntime', () => {
     expect(ends).toContain(false);
     expect(ends[ends.length - 1]).toBe(true);
   });
+
+  it('closes a scheduling event even when an external write creates no React work', async () => {
+    let eventEnds = 0;
+    React.unstable_subscribeToSignalRuntime({
+      onEventEnd() {
+        eventEnds++;
+      },
+    });
+    React.startTransition(() => {
+      expect(React.unstable_getSignalWriteLane()).toBeLessThan(0);
+    });
+    await waitForAll([]);
+    expect(eventEnds).toBe(1);
+  });
 });
