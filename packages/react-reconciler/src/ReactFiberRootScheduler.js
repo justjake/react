@@ -11,6 +11,7 @@ import type {FiberRoot} from './ReactInternalTypes';
 import type {Lane, Lanes} from './ReactFiberLane';
 import type {PriorityLevel} from 'scheduler/src/SchedulerPriorities';
 import type {Transition} from 'react/src/ReactStartTransition';
+import {signalScheduler} from './ReactFiberSignalScheduler';
 
 import {
   disableLegacyMode,
@@ -701,6 +702,16 @@ export function requestTransitionLane(
   // TODO: Make this non-nullable. Requires a tweak to useOptimistic.
   transition: Transition | null,
 ): Lane {
+  if (transition !== null) {
+    // An external signal store may have claimed a lane for the batch this
+    // transition belongs to; every update dispatched under it — including
+    // corrective re-renders long after this event — must share that lane so
+    // they all land in the same commit.
+    const pinned = (transition as any)._signalLane;
+    if (pinned != null) {
+      return pinned as Lane;
+    }
+  }
   // The algorithm for assigning an update to a lane should be stable for all
   // updates at the same priority within the same event. To do this, the
   // inputs to the algorithm must be the same.
@@ -726,6 +737,8 @@ export function requestTransitionLane(
 export function didCurrentEventScheduleTransition(): boolean {
   return currentEventTransitionLane !== NoLane;
 }
+
+signalScheduler.claimTransitionLane = () => requestTransitionLane(null);
 
 export function markIndicatorHandled(root: FiberRoot): void {
   if (enableDefaultTransitionIndicator) {

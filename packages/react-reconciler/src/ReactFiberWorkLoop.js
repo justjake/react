@@ -8,6 +8,7 @@
  */
 
 import {REACT_STRICT_MODE_TYPE} from 'shared/ReactSymbols';
+import {signalScheduler} from './ReactFiberSignalScheduler';
 
 import type {
   Wakeable,
@@ -766,6 +767,13 @@ let isRunningInsertionEffect = false;
 export function getWorkInProgressRoot(): FiberRoot | null {
   return workInProgressRoot;
 }
+
+signalScheduler.getWorkInProgress = () =>
+  workInProgressRoot === null
+    ? null
+    : {root: workInProgressRoot, lanes: workInProgressRootRenderLanes};
+signalScheduler.isRendering = () =>
+  (executionContext & RenderContext) !== NoContext;
 
 export function getCommittingRoot(): FiberRoot | null {
   return pendingEffectsRoot;
@@ -2268,6 +2276,10 @@ function prepareFreshStack(root: FiberRoot, lanes: Lanes): Fiber {
   entangledRenderLanes = getEntangledLanes(root, lanes);
 
   finishQueueingConcurrentUpdates();
+
+  if (signalScheduler.onPassStart !== null) {
+    signalScheduler.onPassStart(root, lanes);
+  }
 
   if (__DEV__) {
     resetOwnerStackLimit();
@@ -4005,6 +4017,9 @@ function flushMutationEffects(): void {
     (finishedWork.subtreeFlags & MutationMask) !== NoFlags;
   const rootMutationHasEffect = (finishedWork.flags & MutationMask) !== NoFlags;
 
+  if (signalScheduler.onMutation !== null) {
+    signalScheduler.onMutation(root, true);
+  }
   if (subtreeMutationHasEffects || rootMutationHasEffect) {
     const prevTransition = ReactSharedInternals.T;
     ReactSharedInternals.T = null;
@@ -4030,12 +4045,20 @@ function flushMutationEffects(): void {
     }
   }
 
+  if (signalScheduler.onMutation !== null) {
+    signalScheduler.onMutation(root, false);
+  }
+
   // The work-in-progress tree is now the current tree. This must come after
   // the mutation phase, so that the previous tree is still current during
   // componentWillUnmount, but before the layout phase, so that the finished
   // work is current during componentDidMount/Update.
   root.current = finishedWork;
   pendingEffectsStatus = PENDING_LAYOUT_PHASE;
+
+  if (signalScheduler.onCommit !== null) {
+    signalScheduler.onCommit(root, lanes);
+  }
 }
 
 function flushLayoutEffects(): void {
