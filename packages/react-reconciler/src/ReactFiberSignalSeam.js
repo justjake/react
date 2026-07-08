@@ -67,10 +67,10 @@ const seam: SignalSeam = {
   runtime: null,
   getWriteLane: null,
   getRenderContainer: null,
-  pinnedTransitionLane: (0: any),
+  pinnedTransitionLane: 0 as any,
 };
 
-(ReactSharedInternals: any).signalSeam = seam;
+(ReactSharedInternals as any).signalSeam = seam;
 
 export default seam;
 

@@ -867,7 +867,7 @@ signalSeam.getWriteLane = function (): Lane {
   const transition = requestCurrentTransition();
   if (
     transition !== null &&
-    !(enableGestureTransition && (transition: any).gesture)
+    !(enableGestureTransition && (transition as any).gesture)
   ) {
     return requestTransitionLane(transition);
   }
