@@ -46,6 +46,7 @@ export {
   addTransitionType as unstable_addTransitionType,
   unstable_useCacheRefresh,
   use,
+  unstable_Signals,
   useActionState,
   useCallback,
   useContext,

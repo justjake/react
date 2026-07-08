@@ -828,6 +828,13 @@ export function requestUpdateLane(fiber: Fiber): Lane {
     return pickArbitraryLane(workInProgressRootRenderLanes);
   }
 
+  const signalRuntime = ReactSharedInternals.X;
+  const signalBatch = ReactSharedInternals.B;
+  if (signalRuntime !== null && signalBatch !== 0) {
+    const lane = signalRuntime.lane(signalBatch);
+    if (lane !== NoLane) return lane;
+  }
+
   const transition = requestCurrentTransition();
   if (transition !== null) {
     if (enableGestureTransition) {
@@ -1011,6 +1018,10 @@ export function scheduleUpdateOnFiber(
 
   // Mark that the root has a pending update.
   markRootUpdated(root, lane);
+  const signalRuntime = ReactSharedInternals.X;
+  if (signalRuntime !== null && ReactSharedInternals.B !== 0) {
+    signalRuntime.schedule(root, lane, ReactSharedInternals.B);
+  }
 
   if (
     (executionContext & RenderContext) !== NoContext &&
@@ -2643,6 +2654,11 @@ function renderRootSync(
     markRenderStarted(lanes);
   }
 
+  const signalRuntime = ReactSharedInternals.X;
+  if (signalRuntime !== null) {
+    ReactSharedInternals.R = signalRuntime.render(root, lanes);
+  }
+
   let didSuspendInShell = false;
   let exitStatus = workInProgressRootExitStatus;
   outer: do {
@@ -2735,6 +2751,7 @@ function renderRootSync(
   if (enableSchedulingProfiler) {
     markRenderStopped();
   }
+  ReactSharedInternals.R = null;
 
   if (workInProgress !== null) {
     // Did not complete the tree. This can happen if something suspended in
@@ -2801,6 +2818,11 @@ function renderRootConcurrent(root: FiberRoot, lanes: Lanes): RootExitStatus {
 
   if (enableSchedulingProfiler) {
     markRenderStarted(lanes);
+  }
+
+  const signalRuntime = ReactSharedInternals.X;
+  if (signalRuntime !== null) {
+    ReactSharedInternals.R = signalRuntime.render(root, lanes);
   }
 
   outer: do {
@@ -3012,6 +3034,7 @@ function renderRootConcurrent(root: FiberRoot, lanes: Lanes): RootExitStatus {
   popDispatcher(prevDispatcher);
   popAsyncDispatcher(prevAsyncDispatcher);
   executionContext = prevExecutionContext;
+  ReactSharedInternals.R = null;
 
   // Check if the tree has completed.
   if (workInProgress !== null) {
@@ -3751,6 +3774,9 @@ function commitRoot(
     suspendedRetryLanes,
   );
 
+  const signalRuntime = ReactSharedInternals.X;
+  if (signalRuntime !== null) signalRuntime.commit(root, lanes, remainingLanes);
+
   // Reset this before firing side effects so we can detect recursive updates.
   didIncludeCommitPhaseUpdate = false;
 
@@ -3853,12 +3879,15 @@ function commitRoot(
     setCurrentUpdatePriority(DiscreteEventPriority);
     const prevExecutionContext = executionContext;
     executionContext |= CommitContext;
+    const signalRuntime = ReactSharedInternals.X;
+    if (signalRuntime !== null) signalRuntime.mutation(root, true);
     try {
       // The first phase a "before mutation" phase. We use this phase to read the
       // state of the host tree right before we mutate it. This is where
       // getSnapshotBeforeUpdate is called.
       commitBeforeMutationEffects(root, finishedWork, lanes);
     } finally {
+      if (signalRuntime !== null) signalRuntime.mutation(root, false);
       // Reset the priority to the previous non-sync value.
       executionContext = prevExecutionContext;
       setCurrentUpdatePriority(previousPriority);

@@ -25,6 +25,7 @@ export {
   createElement,
   createRef,
   use,
+  unstable_Signals,
   forwardRef,
   isValidElement,
   lazy,
