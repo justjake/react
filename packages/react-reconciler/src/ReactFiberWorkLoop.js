@@ -229,6 +229,14 @@ import {
 } from './ReactEventPriorities';
 import {requestCurrentTransition} from './ReactFiberTransition';
 import {
+  claimSignalBatch,
+  signalCommit,
+  signalMutation,
+  signalRenderEnd,
+  signalRenderResume,
+  signalRenderStart,
+} from './ReactFiberSignalRuntime';
+import {
   SelectiveHydrationException,
   beginWork,
   replayFunctionComponent,
@@ -847,7 +855,9 @@ export function requestUpdateLane(fiber: Fiber): Lane {
       transition._updatedFibers.add(fiber);
     }
 
-    return requestTransitionLane(transition);
+    const lane = requestTransitionLane(transition);
+    claimSignalBatch(lane, transition);
+    return lane;
   }
 
   return eventPriorityToLane(resolveUpdatePriority());
@@ -2007,6 +2017,7 @@ function finalizeRender(lanes: Lanes, finalizationTime: number): void {
 }
 
 function prepareFreshStack(root: FiberRoot, lanes: Lanes): Fiber {
+  signalRenderStart(root, lanes);
   if (enableProfilerTimer && enableComponentPerformanceTrack) {
     // The order of tracks within a group are determined by the earliest start time.
     // Are tracks should show up in priority order and we should ideally always show
@@ -2637,6 +2648,8 @@ function renderRootSync(
 
     workInProgressTransitions = getTransitionsForLanes(root, lanes);
     prepareFreshStack(root, lanes);
+  } else {
+    signalRenderResume(root);
   }
 
   if (enableSchedulingProfiler) {
@@ -2750,6 +2763,8 @@ function renderRootSync(
     finishQueueingConcurrentUpdates();
   }
 
+  signalRenderEnd(workInProgress === null);
+
   return exitStatus;
 }
 
@@ -2797,6 +2812,7 @@ function renderRootConcurrent(root: FiberRoot, lanes: Lanes): RootExitStatus {
     // If we were previously in prerendering mode, check if we received any new
     // data during an interleaved event.
     workInProgressRootIsPrerendering = checkIfRootIsPrerendering(root, lanes);
+    signalRenderResume(root);
   }
 
   if (enableSchedulingProfiler) {
@@ -3019,6 +3035,7 @@ function renderRootConcurrent(root: FiberRoot, lanes: Lanes): RootExitStatus {
     if (enableSchedulingProfiler) {
       markRenderYielded();
     }
+    signalRenderEnd(false);
     return RootInProgress;
   } else {
     // Completed the tree.
@@ -3032,6 +3049,7 @@ function renderRootConcurrent(root: FiberRoot, lanes: Lanes): RootExitStatus {
 
     // It's safe to process the queue now that the render phase is complete.
     finishQueueingConcurrentUpdates();
+    signalRenderEnd(true);
 
     // Return the final exit status.
     return workInProgressRootExitStatus;
@@ -3742,6 +3760,8 @@ function commitRoot(
     remainingLanes &= ~GestureLane;
   }
 
+  signalCommit(root, lanes);
+
   markRootFinished(
     root,
     lanes,
@@ -4013,6 +4033,7 @@ function flushMutationEffects(): void {
     const prevExecutionContext = executionContext;
     executionContext |= CommitContext;
     try {
+      signalMutation(root, true);
       // The next phase is the mutation phase, where we mutate the host tree.
       commitMutationEffects(root, finishedWork, lanes);
 
@@ -4023,11 +4044,15 @@ function flushMutationEffects(): void {
       }
       resetAfterCommit(root.containerInfo);
     } finally {
+      signalMutation(root, false);
       // Reset the priority to the previous non-sync value.
       executionContext = prevExecutionContext;
       setCurrentUpdatePriority(previousPriority);
       ReactSharedInternals.T = prevTransition;
     }
+  } else {
+    signalMutation(root, true);
+    signalMutation(root, false);
   }
 
   // The work-in-progress tree is now the current tree. This must come after

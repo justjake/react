@@ -28,6 +28,7 @@ import reportGlobalError from 'shared/reportGlobalError';
 import noop from 'shared/noop';
 
 export type Transition = {
+  _signalBatch?: number,
   types: null | TransitionTypes, // enableViewTransition
   gesture: null | GestureProvider, // enableGestureTransition
   name: null | string, // enableTransitionTracing only
@@ -48,6 +49,9 @@ export function startTransition(
 ): void {
   const prevTransition = ReactSharedInternals.T;
   const currentTransition: Transition = {} as any;
+  if (ReactSharedInternals.B !== 0) {
+    currentTransition._signalBatch = ReactSharedInternals.B;
+  }
   if (enableViewTransition) {
     currentTransition.types =
       prevTransition !== null

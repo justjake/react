@@ -33,6 +33,8 @@ export {
   cacheSignal,
   unstable_useCacheRefresh,
   startTransition,
+  unstable_registerSignalRuntime,
+  unstable_runWithSignalBatch,
   useId,
   useCallback,
   useContext,

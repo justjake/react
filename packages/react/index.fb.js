@@ -31,6 +31,8 @@ export {
   Profiler,
   PureComponent,
   startTransition,
+  unstable_registerSignalRuntime,
+  unstable_runWithSignalBatch,
   StrictMode,
   Suspense,
   Activity,

@@ -45,6 +45,8 @@ export {
   cache,
   cacheSignal,
   startTransition,
+  unstable_registerSignalRuntime,
+  unstable_runWithSignalBatch,
   unstable_LegacyHidden,
   Activity,
   ViewTransition,

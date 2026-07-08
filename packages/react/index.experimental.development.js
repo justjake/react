@@ -29,6 +29,8 @@ export {
   cache,
   cacheSignal,
   startTransition,
+  unstable_registerSignalRuntime,
+  unstable_runWithSignalBatch,
   optimisticKey,
   Activity,
   unstable_getCacheForType,
