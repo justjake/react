@@ -27,6 +27,7 @@ export type SharedStateClient = {
   T: null | Transition, // ReactCurrentBatchConfig for Transitions
   S: null | onStartTransitionFinish,
   G: null | onStartGestureTransitionFinish,
+  E: null | mixed, // External signal runtime protocol.
 
   // DEV-only
 
@@ -62,6 +63,7 @@ const ReactSharedInternals: SharedStateClient = {
   A: null,
   T: null,
   S: null,
+  E: null,
 } as any;
 if (enableGestureTransition) {
   ReactSharedInternals.G = null;

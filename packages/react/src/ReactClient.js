@@ -64,6 +64,13 @@ import {addTransitionType} from './ReactTransitionType';
 import {act} from './ReactAct';
 import {captureOwnerStack} from './ReactOwnerStack';
 import * as ReactCompilerRuntime from './ReactCompilerRuntime';
+import {
+  subscribeToSignalRuntime,
+  getSignalWriteLane,
+  getSignalRenderRoot,
+  getSignalRenderLanes,
+  runInSignalLane,
+} from './ReactSignalRuntime';
 
 const Children = {
   map,
@@ -119,6 +126,11 @@ export {
   getCacheForType as unstable_getCacheForType,
   useCacheRefresh as unstable_useCacheRefresh,
   use,
+  subscribeToSignalRuntime as unstable_subscribeToSignalRuntime,
+  getSignalWriteLane as unstable_getSignalWriteLane,
+  getSignalRenderRoot as unstable_getSignalRenderRoot,
+  getSignalRenderLanes as unstable_getSignalRenderLanes,
+  runInSignalLane as unstable_runInSignalLane,
   // enableScopeAPI
   REACT_SCOPE_TYPE as unstable_Scope,
   // enableTransitionTracing

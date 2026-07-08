@@ -229,6 +229,14 @@ import {
 } from './ReactEventPriorities';
 import {requestCurrentTransition} from './ReactFiberTransition';
 import {
+  registerSignalRuntimeProvider,
+  notifySignalRenderStart,
+  notifySignalRenderCommitted,
+  notifySignalRootCommit,
+  notifySignalBeforeMutation,
+  notifySignalAfterMutation,
+} from './ReactFiberSignalRuntime';
+import {
   SelectiveHydrationException,
   beginWork,
   replayFunctionComponent,
@@ -404,6 +412,8 @@ import {
   flushSyncWorkOnAllRoots,
   flushSyncWorkOnLegacyRootsOnly,
   requestTransitionLane,
+  ensureScheduleIsScheduled,
+  setSignalTransitionLane,
 } from './ReactFiberRootScheduler';
 import {getMaskedContext, getUnmaskedContext} from './ReactFiberLegacyContext';
 import {logUncaughtError} from './ReactFiberErrorLogger';
@@ -851,6 +861,60 @@ export function requestUpdateLane(fiber: Fiber): Lane {
   }
 
   return eventPriorityToLane(resolveUpdatePriority());
+}
+
+registerSignalRuntimeProvider({
+  getWriteLane(): number {
+    let lane;
+    const transition = requestCurrentTransition();
+    if (transition !== null && !(transition as any).gesture) {
+      lane = requestTransitionLane(transition);
+    } else {
+      lane = eventPriorityToLane(resolveUpdatePriority());
+    }
+    ensureScheduleIsScheduled();
+    return includesTransitionLane(lane) ? -lane : lane;
+  },
+  getRenderRoot(): mixed {
+    return (executionContext & RenderContext) !== NoContext &&
+      workInProgressRoot !== null
+      ? workInProgressRoot.containerInfo
+      : null;
+  },
+  getRenderLanes(): number {
+    return (executionContext & RenderContext) !== NoContext
+      ? workInProgressRootRenderLanes
+      : NoLanes;
+  },
+  runInLane: runInSignalLane,
+});
+
+function runInSignalLane<T>(lane: Lane, fn: () => T): T {
+  if ((executionContext & RenderContext) !== NoContext) {
+    throw new Error(
+      'Signal repair updates must not be scheduled during render.',
+    );
+  }
+  const previousTransition = ReactSharedInternals.T;
+  const previousLane = setSignalTransitionLane(lane);
+  const transition: Transition = {} as any;
+  if (enableViewTransition) {
+    transition.types =
+      previousTransition !== null ? previousTransition.types : null;
+  }
+  if (enableGestureTransition) transition.gesture = null;
+  if (enableTransitionTracing) {
+    transition.name = null;
+    transition.startTime = -1;
+  }
+  if (__DEV__) transition._updatedFibers = new Set();
+  ReactSharedInternals.T = transition;
+  try {
+    return fn();
+  } finally {
+    ReactSharedInternals.T = previousTransition;
+    setSignalTransitionLane(previousLane);
+  }
 }
 
 function requestRetryLane(fiber: Fiber) {
@@ -2268,6 +2332,7 @@ function prepareFreshStack(root: FiberRoot, lanes: Lanes): Fiber {
   entangledRenderLanes = getEntangledLanes(root, lanes);
 
   finishQueueingConcurrentUpdates();
+  notifySignalRenderStart(root, lanes);
 
   if (__DEV__) {
     resetOwnerStackLimit();
@@ -3750,6 +3815,8 @@ function commitRoot(
     updatedLanes,
     suspendedRetryLanes,
   );
+  notifySignalRenderCommitted(root);
+  notifySignalRootCommit(root, lanes);
 
   // Reset this before firing side effects so we can detect recursive updates.
   didIncludeCommitPhaseUpdate = false;
@@ -3853,6 +3920,7 @@ function commitRoot(
     setCurrentUpdatePriority(DiscreteEventPriority);
     const prevExecutionContext = executionContext;
     executionContext |= CommitContext;
+    notifySignalBeforeMutation(root);
     try {
       // The first phase a "before mutation" phase. We use this phase to read the
       // state of the host tree right before we mutate it. This is where
@@ -4023,6 +4091,7 @@ function flushMutationEffects(): void {
       }
       resetAfterCommit(root.containerInfo);
     } finally {
+      notifySignalAfterMutation(root);
       // Reset the priority to the previous non-sync value.
       executionContext = prevExecutionContext;
       setCurrentUpdatePriority(previousPriority);

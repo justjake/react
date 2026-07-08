@@ -53,6 +53,10 @@ import {
 } from './ReactFiberWorkLoop';
 import {LegacyRoot} from './ReactRootTags';
 import {
+  notifySignalRootPending,
+  notifySignalEventEnd,
+} from './ReactFiberSignalRuntime';
+import {
   ImmediatePriority as ImmediateSchedulerPriority,
   UserBlockingPriority as UserBlockingSchedulerPriority,
   NormalPriority as NormalSchedulerPriority,
@@ -291,6 +295,7 @@ function processRootScheduleInMicrotask() {
   while (root !== null) {
     const next = root.next;
     const nextLanes = scheduleTaskForRootDuringMicrotask(root, currentTime);
+    notifySignalRootPending(root);
     if (nextLanes === NoLane) {
       // This root has no more pending work. Remove it from the schedule. To
       // guard against subtle reentrancy bugs, this microtask is the only place
@@ -345,6 +350,7 @@ function processRootScheduleInMicrotask() {
     currentEventTransitionLane = NoLane;
     startDefaultTransitionIndicatorIfNeeded();
   }
+  notifySignalEventEnd();
 }
 
 function startDefaultTransitionIndicatorIfNeeded() {
@@ -701,6 +707,7 @@ export function requestTransitionLane(
   // TODO: Make this non-nullable. Requires a tweak to useOptimistic.
   transition: Transition | null,
 ): Lane {
+  if (signalTransitionLane !== NoLane) return signalTransitionLane;
   // The algorithm for assigning an update to a lane should be stable for all
   // updates at the same priority within the same event. To do this, the
   // inputs to the algorithm must be the same.
@@ -721,6 +728,14 @@ export function requestTransitionLane(
           claimNextTransitionUpdateLane();
   }
   return currentEventTransitionLane;
+}
+
+let signalTransitionLane: Lane = NoLane;
+
+export function setSignalTransitionLane(lane: Lane): Lane {
+  const previous = signalTransitionLane;
+  signalTransitionLane = lane;
+  return previous;
 }
 
 export function didCurrentEventScheduleTransition(): boolean {
