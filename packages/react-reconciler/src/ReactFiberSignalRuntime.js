@@ -16,6 +16,24 @@ import ReactSharedInternals from 'shared/ReactSharedInternals';
 const batchesByLane: Int32Array = new Int32Array(31);
 const renderedBatches: Map<FiberRoot, Array<number>> = new Map();
 
+export function laneForSignalBatch(batch: number): Lane {
+  for (let index = 0, lane = 1; index < 31; index++, lane *= 2) {
+    if (batchesByLane[index] === batch) return lane;
+  }
+  return 0;
+}
+
+ReactSharedInternals.P = function <T>(batch: number, scope: () => T): T {
+  if (laneForSignalBatch(batch) === 0) return scope();
+  const previous = ReactSharedInternals.T;
+  ReactSharedInternals.T = ({_signalBatch: batch}: any);
+  try {
+    return scope();
+  } finally {
+    ReactSharedInternals.T = previous;
+  }
+};
+
 function batchesFor(lanes: Lanes): Array<number> {
   const result = [];
   let lane = 1;

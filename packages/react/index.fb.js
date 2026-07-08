@@ -33,6 +33,7 @@ export {
   startTransition,
   unstable_registerSignalRuntime,
   unstable_runWithSignalBatch,
+  unstable_runInSignalBatch,
   StrictMode,
   Suspense,
   Activity,

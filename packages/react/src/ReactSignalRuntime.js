@@ -29,3 +29,8 @@ export function runWithSignalBatch<T>(batch: number, scope: () => T): T {
     ReactSharedInternals.B = previous;
   }
 }
+
+export function runInSignalBatch<T>(batch: number, scope: () => T): T {
+  const pin = ReactSharedInternals.P;
+  return pin === null ? scope() : pin(batch, scope);
+}

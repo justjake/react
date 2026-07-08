@@ -29,6 +29,7 @@ export type SharedStateClient = {
   G: null | onStartGestureTransitionFinish,
   R: null | mixed, // Optional external signal runtime.
   B: number, // External signal batch active while a transition is created.
+  P: null | (<T>(number, () => T) => T), // Renderer-provided live-batch pin.
 
   // DEV-only
 
@@ -66,6 +67,7 @@ const ReactSharedInternals: SharedStateClient = {
   S: null,
   R: null,
   B: 0,
+  P: null,
 } as any;
 if (enableGestureTransition) {
   ReactSharedInternals.G = null;

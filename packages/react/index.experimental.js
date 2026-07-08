@@ -31,6 +31,7 @@ export {
   startTransition,
   unstable_registerSignalRuntime,
   unstable_runWithSignalBatch,
+  unstable_runInSignalBatch,
   optimisticKey,
   Activity,
   Activity as unstable_Activity,

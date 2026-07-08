@@ -230,6 +230,7 @@ import {
 import {requestCurrentTransition} from './ReactFiberTransition';
 import {
   claimSignalBatch,
+  laneForSignalBatch,
   signalCommit,
   signalMutation,
   signalRenderEnd,
@@ -855,7 +856,12 @@ export function requestUpdateLane(fiber: Fiber): Lane {
       transition._updatedFibers.add(fiber);
     }
 
-    const lane = requestTransitionLane(transition);
+    const pinnedLane =
+      transition._signalBatch === undefined
+        ? NoLane
+        : laneForSignalBatch(transition._signalBatch);
+    const lane =
+      pinnedLane === NoLane ? requestTransitionLane(transition) : pinnedLane;
     claimSignalBatch(lane, transition);
     return lane;
   }
