@@ -98,6 +98,18 @@ const unstable_Signals = {
   world() {
     return ReactSharedInternals.R;
   },
+  urgent(fn) {
+    const transition = ReactSharedInternals.T;
+    const batch = ReactSharedInternals.B;
+    ReactSharedInternals.T = null;
+    ReactSharedInternals.B = 0;
+    try {
+      return fn();
+    } finally {
+      ReactSharedInternals.T = transition;
+      ReactSharedInternals.B = batch;
+    }
+  },
   reset() {
     ReactSharedInternals.X = null;
     ReactSharedInternals.B = 0;

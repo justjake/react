@@ -3879,15 +3879,12 @@ function commitRoot(
     setCurrentUpdatePriority(DiscreteEventPriority);
     const prevExecutionContext = executionContext;
     executionContext |= CommitContext;
-    const signalRuntime = ReactSharedInternals.X;
-    if (signalRuntime !== null) signalRuntime.mutation(root, true);
     try {
       // The first phase a "before mutation" phase. We use this phase to read the
       // state of the host tree right before we mutate it. This is where
       // getSnapshotBeforeUpdate is called.
       commitBeforeMutationEffects(root, finishedWork, lanes);
     } finally {
-      if (signalRuntime !== null) signalRuntime.mutation(root, false);
       // Reset the priority to the previous non-sync value.
       executionContext = prevExecutionContext;
       setCurrentUpdatePriority(previousPriority);
@@ -4041,6 +4038,8 @@ function flushMutationEffects(): void {
     setCurrentUpdatePriority(DiscreteEventPriority);
     const prevExecutionContext = executionContext;
     executionContext |= CommitContext;
+    const signalRuntime = ReactSharedInternals.X;
+    if (signalRuntime !== null) signalRuntime.mutation(root, true);
     try {
       // The next phase is the mutation phase, where we mutate the host tree.
       commitMutationEffects(root, finishedWork, lanes);
@@ -4052,6 +4051,7 @@ function flushMutationEffects(): void {
       }
       resetAfterCommit(root.containerInfo);
     } finally {
+      if (signalRuntime !== null) signalRuntime.mutation(root, false);
       // Reset the priority to the previous non-sync value.
       executionContext = prevExecutionContext;
       setCurrentUpdatePriority(previousPriority);
