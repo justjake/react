@@ -101,4 +101,26 @@ describe('Royale external runtime protocol', () => {
       events.filter(event => event === 'end').length,
     );
   });
+
+  it('pins corrective updates to the owning transition lane', async () => {
+    let setValue;
+    let renderedLanes = 0;
+    function App() {
+      const [value, set] = React.useState(0);
+      setValue = set;
+      renderedLanes = React.unstable_getRenderContext().renderLanes;
+      return <span>{value}</span>;
+    }
+    const root = ReactNoop.createRoot();
+    await act(() => root.render(<App />));
+    let lane;
+    React.startTransition(() => {
+      lane = React.unstable_getCurrentUpdateLane();
+    });
+    React.unstable_runInLane(lane, () => setValue(1));
+    await act(() => {});
+
+    expect(React.unstable_lanesInclude(renderedLanes, lane)).toBe(true);
+    expect(root).toMatchRenderedOutput(<span>1</span>);
+  });
 });

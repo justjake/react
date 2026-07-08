@@ -701,6 +701,9 @@ export function requestTransitionLane(
   // TODO: Make this non-nullable. Requires a tweak to useOptimistic.
   transition: Transition | null,
 ): Lane {
+  if (externalRuntimeLane !== NoLane) {
+    return externalRuntimeLane;
+  }
   // The algorithm for assigning an update to a lane should be stable for all
   // updates at the same priority within the same event. To do this, the
   // inputs to the algorithm must be the same.
@@ -721,6 +724,14 @@ export function requestTransitionLane(
           claimNextTransitionUpdateLane();
   }
   return currentEventTransitionLane;
+}
+
+let externalRuntimeLane: Lane = NoLane;
+
+export function setExternalRuntimeLane(lane: Lane): Lane {
+  const previous = externalRuntimeLane;
+  externalRuntimeLane = lane;
+  return previous;
 }
 
 export function didCurrentEventScheduleTransition(): boolean {

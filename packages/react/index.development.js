@@ -57,6 +57,7 @@ export {
   unstable_subscribeToExternalRuntime,
   unstable_getRenderContext,
   unstable_getCurrentUpdateLane,
+  unstable_runInLane,
   unstable_isTransitionLane,
   unstable_lanesInclude,
   useId,

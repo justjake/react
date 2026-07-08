@@ -74,6 +74,7 @@ export type ExternalRuntimeProvider = {
   getCurrentUpdateLane: () => number,
   isTransitionLane: (lane: number) => boolean,
   lanesInclude: (lanes: number, lane: number) => boolean,
+  runInLane: <T>(lane: number, fn: () => T) => T,
 };
 
 const listeners: Set<ExternalRuntimeListener> = new Set();
@@ -173,4 +174,9 @@ export function externalRuntimeLanesInclude(
 ): boolean {
   const providers = runtime.providers;
   return providers.length > 0 ? providers[0].lanesInclude(lanes, lane) : false;
+}
+
+export function externalRuntimeRunInLane<T>(lane: number, fn: () => T): T {
+  const providers = runtime.providers;
+  return providers.length > 0 ? providers[0].runInLane(lane, fn) : fn();
 }

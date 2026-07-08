@@ -413,6 +413,7 @@ import {
   flushSyncWorkOnAllRoots,
   flushSyncWorkOnLegacyRootsOnly,
   requestTransitionLane,
+  setExternalRuntimeLane,
 } from './ReactFiberRootScheduler';
 import {getMaskedContext, getUnmaskedContext} from './ReactFiberLegacyContext';
 import {logUncaughtError} from './ReactFiberErrorLogger';
@@ -901,6 +902,20 @@ registerExternalRuntimeProvider({
   },
   lanesInclude(lanes: number, lane: number): boolean {
     return (lanes & lane) !== 0;
+  },
+  runInLane<T>(lane: number, fn: () => T): T {
+    if ((executionContext & RenderContext) !== NoContext) {
+      throw new Error('runInLane must not be called while React is rendering.');
+    }
+    const previousTransition = ReactSharedInternals.T;
+    const previousLane = setExternalRuntimeLane(lane as Lane);
+    ReactSharedInternals.T = ({_updatedFibers: new Set()}: any);
+    try {
+      return fn();
+    } finally {
+      ReactSharedInternals.T = previousTransition;
+      setExternalRuntimeLane(previousLane);
+    }
   },
 });
 

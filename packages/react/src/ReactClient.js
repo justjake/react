@@ -70,6 +70,7 @@ import {
   getExternalRuntimeCurrentUpdateLane,
   externalRuntimeIsTransitionLane,
   externalRuntimeLanesInclude,
+  externalRuntimeRunInLane,
 } from './ReactExternalRuntime';
 
 const Children = {
@@ -132,6 +133,7 @@ export {
   getExternalRuntimeCurrentUpdateLane as unstable_getCurrentUpdateLane,
   externalRuntimeIsTransitionLane as unstable_isTransitionLane,
   externalRuntimeLanesInclude as unstable_lanesInclude,
+  externalRuntimeRunInLane as unstable_runInLane,
   // enableScopeAPI
   REACT_SCOPE_TYPE as unstable_Scope,
   // enableTransitionTracing
