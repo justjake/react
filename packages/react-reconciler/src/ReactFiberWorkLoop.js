@@ -807,7 +807,47 @@ export function getCurrentTime(): number {
   return now();
 }
 
+// Royale host protocol: a userland signal runtime registers a single callback
+// at (ReactSharedInternals as any).royaleHost to observe the boundaries React
+// cannot otherwise report — render slices (with their lanes, so an external
+// store can resolve which pending write batches this pass may see), commits,
+// and the DOM mutation window. Two helpers are exported on the same object:
+// royaleProbeLane (which lane an update issued right now would get) and
+// royaleRunWithLane (pin updates issued inside the callback to a given lane,
+// so a late subscriber's corrective update joins the owning transition's
+// commit instead of landing beside it). Everything is inert until a host
+// registers; detached cost is one null check per site.
+let royaleForcedLane: Lane = NoLane;
+
+function royaleEvent(kind: string, container: mixed, lanes: Lanes): void {
+  const host = (ReactSharedInternals as any).royaleHost;
+  if (host != null) {
+    host(kind, container, lanes);
+  }
+}
+
+(ReactSharedInternals as any).royaleProbeLane = (): Lane => {
+  const transition = requestCurrentTransition();
+  return transition !== null ? requestTransitionLane(transition) : NoLane;
+};
+
+(ReactSharedInternals as any).royaleRunWithLane = (
+  lane: Lane,
+  fn: () => mixed,
+): mixed => {
+  const prev = royaleForcedLane;
+  royaleForcedLane = lane;
+  try {
+    return fn();
+  } finally {
+    royaleForcedLane = prev;
+  }
+};
+
 export function requestUpdateLane(fiber: Fiber): Lane {
+  if (royaleForcedLane !== NoLane) {
+    return royaleForcedLane;
+  }
   // Special cases
   const mode = fiber.mode;
   if (!disableLegacyMode && (mode & ConcurrentMode) === NoMode) {
@@ -2615,6 +2655,7 @@ function renderRootSync(
   executionContext |= RenderContext;
   const prevDispatcher = pushDispatcher(root.containerInfo);
   const prevAsyncDispatcher = pushAsyncDispatcher();
+  royaleEvent('render-start', root.containerInfo, lanes);
 
   // If the root or lanes have changed, throw out the existing stack
   // and prepare a fresh one. Otherwise we'll continue where we left off.
@@ -2728,6 +2769,7 @@ function renderRootSync(
 
   resetContextDependencies();
 
+  royaleEvent('render-stop', root.containerInfo, lanes);
   executionContext = prevExecutionContext;
   popDispatcher(prevDispatcher);
   popAsyncDispatcher(prevAsyncDispatcher);
@@ -2767,6 +2809,7 @@ function renderRootConcurrent(root: FiberRoot, lanes: Lanes): RootExitStatus {
   executionContext |= RenderContext;
   const prevDispatcher = pushDispatcher(root.containerInfo);
   const prevAsyncDispatcher = pushAsyncDispatcher();
+  royaleEvent('render-start', root.containerInfo, lanes);
 
   // If the root or lanes have changed, throw out the existing stack
   // and prepare a fresh one. Otherwise we'll continue where we left off.
@@ -3009,6 +3052,7 @@ function renderRootConcurrent(root: FiberRoot, lanes: Lanes): RootExitStatus {
   } while (true);
   resetContextDependencies();
 
+  royaleEvent('render-stop', root.containerInfo, lanes);
   popDispatcher(prevDispatcher);
   popAsyncDispatcher(prevAsyncDispatcher);
   executionContext = prevExecutionContext;
@@ -3719,6 +3763,8 @@ function commitRoot(
   suspendedCommitReason: SuspendedCommitReason, // Profiling-only
   completedRenderEndTime: number, // Profiling-only
 ) {
+  royaleEvent('commit', root.containerInfo, lanes);
+
   // Check which lanes no longer have any work scheduled on them, and mark
   // those as finished.
   let remainingLanes = mergeLanes(finishedWork.lanes, finishedWork.childLanes);
@@ -4014,7 +4060,9 @@ function flushMutationEffects(): void {
     executionContext |= CommitContext;
     try {
       // The next phase is the mutation phase, where we mutate the host tree.
+      royaleEvent('mutation-start', root.containerInfo, lanes);
       commitMutationEffects(root, finishedWork, lanes);
+      royaleEvent('mutation-stop', root.containerInfo, lanes);
 
       if (enableCreateEventHandleAPI) {
         if (shouldFireAfterActiveInstanceBlur) {
