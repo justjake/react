@@ -196,6 +196,109 @@ describe('ReactFiberSignalsTaps', () => {
     expect(events[scheduled].lanes & (packedLane & 0x7fffffff)).not.toBe(0);
   });
 
+  it('reports the lane and thenable for a store-only async action', async () => {
+    let closed;
+    taps.consumer = {
+      onRootUpdated() {},
+      onScheduledRootPending() {},
+      onEventClosed(actionLane, actionThenable) {
+        closed = {actionLane, actionThenable};
+        taps.watchedLanes = 0;
+      },
+      onRenderPassStart() {},
+      onRenderPassYield() {},
+      onRenderPassResume() {},
+      onRootCommitted() {},
+      onBeforeMutation() {},
+      onAfterMutation() {},
+    };
+    let resolveGate;
+    const gate = new Promise(resolve => {
+      resolveGate = resolve;
+    });
+    let packedLane;
+    React.startTransition(async () => {
+      packedLane = taps.getCurrentWriteLane();
+      taps.watchedLanes |= packedLane & 0x7fffffff;
+      await gate;
+    });
+    await act(() => {});
+
+    expect(closed.actionLane).toBe(packedLane & 0x7fffffff);
+    expect(closed.actionThenable).not.toBe(null);
+    resolveGate();
+    await act(() => gate);
+  });
+
+  it('reports one spanning lane separately on staggered roots', async () => {
+    const commits = [];
+    taps.consumer = {
+      onRootUpdated() {},
+      onScheduledRootPending() {},
+      onEventClosed() {},
+      onRenderPassStart() {},
+      onRenderPassYield() {},
+      onRenderPassResume() {},
+      onRootCommitted(root, container, finished, remaining, repended) {
+        commits.push({root, container, finished, remaining, repended});
+      },
+      onBeforeMutation() {},
+      onAfterMutation() {},
+    };
+    let setA;
+    let setB;
+    let rootAIdentity;
+    let rootBIdentity;
+    let resolveGate;
+    const gate = new Promise(resolve => {
+      resolveGate = resolve;
+    });
+    function A() {
+      const [value, set] = React.useState(0);
+      setA = set;
+      rootAIdentity = taps.getRenderContext().root;
+      return <Text text={`A${value}`} />;
+    }
+    function B() {
+      const [value, set] = React.useState(0);
+      setB = set;
+      rootBIdentity = taps.getRenderContext().root;
+      if (value !== 0) React.use(gate);
+      return <Text text={`B${value}`} />;
+    }
+    const rootA = ReactNoop.createRoot();
+    const rootB = ReactNoop.createRoot();
+    await act(() => rootA.render(<A />));
+    assertLog(['A0']);
+    await act(() => rootB.render(<B />));
+    assertLog(['B0']);
+    commits.length = 0;
+
+    let packedLane;
+    await act(() => {
+      React.startTransition(() => {
+        packedLane = taps.getCurrentWriteLane();
+        taps.watchedLanes |= packedLane & 0x7fffffff;
+        setA(1);
+        setB(1);
+      });
+    });
+    assertLog(['A1']);
+    const lane = packedLane & 0x7fffffff;
+    const first = commits.filter(commit => (commit.finished & lane) !== 0);
+    expect(first.map(commit => commit.root)).toEqual([rootAIdentity]);
+
+    resolveGate();
+    await act(() => gate);
+    assertLog(['B1']);
+    const all = commits.filter(commit => (commit.finished & lane) !== 0);
+    expect(all.map(commit => commit.root)).toEqual([
+      rootAIdentity,
+      rootBIdentity,
+    ]);
+    taps.watchedLanes = 0;
+  });
+
   it('reports raw yield and resume edges around each time-slicing gap', async () => {
     const events = [];
     taps.consumer = {
@@ -251,6 +354,66 @@ describe('ReactFiberSignalsTaps', () => {
       'resume',
       'commit',
     ]);
+  });
+
+  it('pins a yield-gap update to the pending transition lane', async () => {
+    const commits = [];
+    taps.consumer = {
+      onRootUpdated() {},
+      onScheduledRootPending() {},
+      onEventClosed() {},
+      onRenderPassStart() {},
+      onRenderPassYield() {},
+      onRenderPassResume() {},
+      onRootCommitted(root, container, finished) {
+        commits.push({root, container, finished});
+      },
+      onBeforeMutation() {},
+      onAfterMutation() {},
+    };
+    let setValue;
+    let setEntangled;
+    function App() {
+      const [value, set] = React.useState(0);
+      const [entangled, setOther] = React.useState(0);
+      setValue = set;
+      setEntangled = setOther;
+      return (
+        <>
+          <Text text={`A${value}`} />
+          <Text text={`B${value}`} />
+          <Text text={`E${entangled}`} />
+        </>
+      );
+    }
+    const root = ReactNoop.createRoot();
+    await act(() => root.render(<App />));
+    assertLog(['A0', 'B0', 'E0']);
+    commits.length = 0;
+
+    let packedLane;
+    let deliveryLane;
+    await act(async () => {
+      React.startTransition(() => {
+        packedLane = taps.getCurrentWriteLane();
+        taps.watchedLanes |= packedLane & 0x7fffffff;
+        setValue(1);
+      });
+      await waitFor(['A1']);
+      taps.runInBatch(packedLane, () => {
+        deliveryLane = taps.getCurrentWriteLane();
+        setEntangled(1);
+      });
+      await waitForAll(['B1', 'E0', 'A1', 'B1', 'E1']);
+    });
+
+    expect(deliveryLane).toBe(packedLane);
+    expect(root).toMatchRenderedOutput('A1B1E1');
+    const lane = packedLane & 0x7fffffff;
+    expect(commits.filter(commit => (commit.finished & lane) !== 0).length).toBe(
+      2,
+    );
+    taps.watchedLanes = 0;
   });
 
   it('classifies writes and preserves deferred and urgent lane pins', () => {
