@@ -52,10 +52,7 @@ import {
   performWorkOnRoot,
 } from './ReactFiberWorkLoop';
 import {LegacyRoot} from './ReactRootTags';
-import {
-  batchRegistryOnEventClosed,
-  batchRegistryBackfillRoot,
-} from './ReactFiberBatchRegistry';
+import {signalsTaps} from './ReactFiberSignalsTaps';
 import {
   ImmediatePriority as ImmediateSchedulerPriority,
   UserBlockingPriority as UserBlockingSchedulerPriority,
@@ -85,7 +82,10 @@ import {
   resetNestedUpdateFlag,
   syncNestedUpdateFlag,
 } from './ReactProfilerTimer';
-import {peekEntangledActionLane} from './ReactFiberAsyncAction';
+import {
+  peekEntangledActionLane,
+  peekEntangledActionThenable,
+} from './ReactFiberAsyncAction';
 
 import noop from 'shared/noop';
 import reportGlobalError from 'shared/reportGlobalError';
@@ -317,10 +317,16 @@ function processRootScheduleInMicrotask() {
       // This root still has work. Keep it in the list.
       prev = root;
 
-      // External-runtime batch registry: repair pending edges missed because
-      // an update was scheduled before its batch's id was created (see
-      // batchRegistryBackfillRoot). Must run before the close edge below.
-      batchRegistryBackfillRoot(root);
+      if ((root.pendingLanes & signalsTaps.watchedLanes) !== NoLanes) {
+        const consumer = signalsTaps.consumer;
+        if (consumer !== null) {
+          consumer.onScheduledRootPending(
+            root,
+            root.containerInfo,
+            root.pendingLanes,
+          );
+        }
+      }
 
       // This is a fast-path optimization to early exit from
       // flushSyncWorkOnAllRoots if we can be certain that there is no remaining
@@ -354,9 +360,15 @@ function processRootScheduleInMicrotask() {
     currentEventTransitionLane = NoLane;
     startDefaultTransitionIndicatorIfNeeded();
   }
-  // External-runtime batch registry: the event's scheduling is settled;
-  // batches that never produced React work retire now (close edge).
-  batchRegistryOnEventClosed();
+  if (signalsTaps.watchedLanes !== NoLanes) {
+    const consumer = signalsTaps.consumer;
+    if (consumer !== null) {
+      consumer.onEventClosed(
+        peekEntangledActionLane(),
+        peekEntangledActionThenable(),
+      );
+    }
+  }
 }
 
 function startDefaultTransitionIndicatorIfNeeded() {

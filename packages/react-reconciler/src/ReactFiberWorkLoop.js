@@ -229,23 +229,7 @@ import {
   eventPriorityToLane,
 } from './ReactEventPriorities';
 import {requestCurrentTransition} from './ReactFiberTransition';
-import {
-  getOrCreateBatchId,
-  lookupLiveBatchSlot,
-  resetBatchRegistryForTest,
-  batchRegistryOnRootUpdated,
-  batchRegistryOnRootFinished,
-} from './ReactFiberBatchRegistry';
-import {
-  registerExternalRuntimeProvider,
-  notifyRenderPassStart,
-  notifyRenderPassYield,
-  notifyRenderPassResume,
-  notifyRenderPassCommitted,
-  notifyBeforeMutation,
-  notifyAfterMutation,
-  getRootsWithOpenPassFrames,
-} from './ReactFiberExternalRuntime';
+import {signalsTaps} from './ReactFiberSignalsTaps';
 import {
   SelectiveHydrationException,
   beginWork,
@@ -873,98 +857,49 @@ export function requestUpdateLane(fiber: Fiber): Lane {
   return eventPriorityToLane(resolveUpdatePriority());
 }
 
-// External-runtime introspection provider (see ReactFiberExternalRuntime).
-// The write-classification cascade mirrors requestUpdateLane above, minus the
-// fiber-specific legacy-mode case (external state has no fiber yet) and with
-// gesture transitions treated as plain event-priority updates rather than an
-// error — an external write during a gesture is not schedulable state.
-// requestTransitionLane is idempotent within one event, so claiming the lane
-// here attributes the write to exactly the batch the caller's subsequent
-// setState calls join.
-registerExternalRuntimeProvider({
-  getRenderContext(): null | {container: mixed} {
-    if (
-      (executionContext & RenderContext) !== NoContext &&
-      workInProgressRoot !== null &&
-      workInProgressRootRenderLanes !== NoLanes
-    ) {
-      return {container: workInProgressRoot.containerInfo};
-    }
-    return null;
-  },
-  // Batch identity for an external write happening right now: a positive
-  // integer batch id. Created lazily (per batch, never per write — through
-  // the registered batch-id allocator when one exists, which is also where
-  // the batch's deferred classification is told to the store); per-write
-  // calls after creation never allocate.
-  getCurrentWriteBatch(): number {
-    let lane;
-    let deferred = false;
-    if (
-      (executionContext & RenderContext) !== NoContext &&
-      workInProgressRootRenderLanes !== NoLanes
-    ) {
-      lane = pickArbitraryLane(workInProgressRootRenderLanes);
-      deferred = laneIsTransitionLane(lane as any);
-    } else {
-      const transition = requestCurrentTransition();
-      if (transition !== null && !(transition as any).gesture) {
-        lane = requestTransitionLane(transition);
-        deferred = true;
-      } else {
-        lane = eventPriorityToLane(resolveUpdatePriority());
-      }
-    }
-    const batchId = getOrCreateBatchId(lane, deferred);
-    // Creating a batch id must guarantee a close edge even if the batch
-    // never schedules React work: make sure the scheduling microtask runs.
-    ensureScheduleIsScheduled();
-    return batchId;
-  },
-  discardAllWip: discardAllWorkInProgress,
-  runInBatch: runInBatchImpl,
-  resetBatchRegistryForTest,
-});
+function getSignalsRenderContext(): null | {
+  root: FiberRoot,
+  container: mixed,
+} {
+  if (
+    (executionContext & RenderContext) !== NoContext &&
+    workInProgressRoot !== null &&
+    workInProgressRootRenderLanes !== NoLanes
+  ) {
+    return {
+      root: workInProgressRoot,
+      container: workInProgressRoot.containerInfo,
+    };
+  }
+  return null;
+}
 
-/**
- * Run `fn` so the React updates it schedules are attributed to the batch
- * identified by `batchId` (cosignal spec §4.1 fact 4: lane-scoped
- * scheduling). This is how an external store's late correction rides INSIDE
- * a pending batch and commits with it — a fresh startTransition would mint
- * a lane React never entangles with the batch, so the two could commit
- * separately (torn).
- *
- * Contract, by batch state:
- * - LIVE deferred batch (its slot's stored deferred flag): `fn` runs inside
- *   a transition pinned to the batch's own lane. Every update it schedules
- *   — setState, useOptimistic, even a nested startTransition — joins that
- *   lane, and same-lane updates entangle through React's ordinary
- *   hook-queue path. An external write inside `fn` classifies into the same
- *   batch: getCurrentWriteBatch() returns `batchId`.
- * - LIVE urgent batch: `fn` runs at the batch's own event priority (the
- *   lane it was created on), outside any transition.
- * - RETIRED or unknown batch id (including BATCH_NONE): the documented
- *   fallback — `fn` runs urgent (discrete priority, outside any
- *   transition), so a corrective update flushes pre-paint. Note a batch
- *   counts as live through its retiring commit's onRootCommitted report
- *   (retirement emits follow the report), so a delivery issued inside that
- *   listener still lands on the outgoing batch's lane while later calls
- *   take this fallback.
- *
- * Legal from event handlers, effects (including layout effects and the
- * commit-phase channel listeners), timers, and the yield gaps of an open
- * pass frame — anywhere except the render phase, where update attribution
- * belongs to the pass itself; callers who learn of work mid-render must
- * queue it to the pass's yield or end edge instead.
- *
- * Scheduling into a batch whose pass already COMPLETED (but has not
- * committed) forces React's ordinary pre-commit restart, so the batch still
- * commits atomically, once, with the update included. `fn` runs
- * synchronously and its result is returned; the pin covers only `fn`'s
- * synchronous extent (updates scheduled by code `fn` merely arranges to run
- * later — timers, awaited continuations — classify ambiently).
- */
-function runInBatchImpl<R>(batchId: number, fn: () => R): R {
+function getCurrentWriteLane(): number {
+  let lane;
+  let deferred = false;
+  if (
+    (executionContext & RenderContext) !== NoContext &&
+    workInProgressRootRenderLanes !== NoLanes
+  ) {
+    lane = pickArbitraryLane(workInProgressRootRenderLanes);
+    deferred = laneIsTransitionLane(lane as any);
+  } else {
+    const transition = requestCurrentTransition();
+    if (transition !== null && !(transition as any).gesture) {
+      lane = requestTransitionLane(transition);
+      deferred = true;
+    } else {
+      lane = eventPriorityToLane(resolveUpdatePriority());
+    }
+  }
+  ensureScheduleIsScheduled();
+  return deferred ? lane | 0x80000000 : lane;
+}
+
+signalsTaps.getRenderContext = getSignalsRenderContext;
+signalsTaps.getCurrentWriteLane = getCurrentWriteLane;
+
+function runInSignalsBatch<R>(packedLane: number, fn: () => R): R {
   if ((executionContext & RenderContext) !== NoContext) {
     throw new Error(
       'runInBatch must not be called while React is rendering. Update ' +
@@ -973,19 +908,13 @@ function runInBatchImpl<R>(batchId: number, fn: () => R): R {
         "at the pass's yield or end edge.",
     );
   }
-  const slot = lookupLiveBatchSlot(batchId);
-  const lane = slot !== null ? slot.lane : NoLane;
+  const lane = packedLane & 0x7fffffff;
+  const deferred = (packedLane & 0x80000000) !== 0;
   const prevTransition = ReactSharedInternals.T;
   const previousPriority = getCurrentUpdatePriority();
-  // Save/restore unconditionally: nested runInBatch calls compose, with the
-  // innermost pin winning for its extent, and an urgent/fallback run must
-  // not leak an outer call's deferred pin into transitions started inside.
   const previousRunInBatchLane = setRunInBatchTransitionLane(NoLane);
   try {
-    if (slot !== null && lane !== NoLane && slot.deferred) {
-      // Live deferred batch: pin the transition lane and enter a transition
-      // scope shaped like startTransition's (ReactFiberHooks), so
-      // requestUpdateLane takes the transition path for every update in fn.
+    if (lane !== NoLane && deferred) {
       setRunInBatchTransitionLane(lane);
       const transition: Transition = {} as any;
       if (enableViewTransition) {
@@ -1004,8 +933,6 @@ function runInBatchImpl<R>(batchId: number, fn: () => R): R {
       }
       ReactSharedInternals.T = transition;
     } else {
-      // Live urgent batch: the lane it was created on. Retired or unknown
-      // (lane === NoLane): the documented urgent fallback.
       setCurrentUpdatePriority(
         lane !== NoLane ? lanesToEventPriority(lane) : DiscreteEventPriority,
       );
@@ -1019,46 +946,7 @@ function runInBatchImpl<R>(batchId: number, fn: () => R): R {
   }
 }
 
-/**
- * Synchronously abandon every work-in-progress pass on every root (cosignal
- * spec §4.1 fact 2): the in-progress or yielded render, and every
- * completed-but-uncommitted tree whose commit is suspended or throttled.
- * Each open frame closes with the discard disposition before this returns —
- * afterwards no pass frame is open and no work-in-progress fiber retains
- * render-minted hook state (interrupted work is unwound on the spot; the
- * discarded trees can never commit). React re-schedules the abandoned lanes:
- * a later retry is a fresh pass over the same still-live batches.
- *
- * Legal whenever React is not actively rendering or committing on this
- * thread. Callers inside an effect or a channel listener must defer to a
- * microtask instead; calling from those phases throws.
- */
-export function discardAllWorkInProgress(): void {
-  if ((executionContext & (RenderContext | CommitContext)) !== NoContext) {
-    throw new Error(
-      'discardAllWip must not be called while React is rendering or ' +
-        'committing. Defer the call until React has yielded, e.g. in a ' +
-        'microtask.',
-    );
-  }
-  const roots = getRootsWithOpenPassFrames();
-  for (let i = 0; i < roots.length; i++) {
-    const root = roots[i];
-    // The NoLanes reset (the fatal-error precedent): unwinds any
-    // work-in-progress stack, cancels a suspended or throttled pending
-    // commit, and fires this root's pass-end(discard) edge through
-    // notifyRenderPassStart's implicit-end path without opening a new
-    // frame.
-    prepareFreshStack(root, NoLanes);
-    // A canceled pending commit leaves its lanes suspended with nothing
-    // left to wake them (the commit's ready-listener is gone). Ping every
-    // suspended lane so the discarded work re-renders; lanes suspended on
-    // genuinely pending data simply re-suspend and keep their original
-    // ping listeners.
-    markRootPinged(root, root.suspendedLanes);
-    ensureRootIsScheduled(root);
-  }
-}
+signalsTaps.runInBatch = runInSignalsBatch;
 
 function requestRetryLane(fiber: Fiber) {
   // This is a fork of `requestUpdateLane` designed specifically for Suspense
@@ -1961,9 +1849,12 @@ function isRenderConsistentWithExternalStores(finishedWork: Fiber): boolean {
 function markRootUpdated(root: FiberRoot, updatedLanes: Lanes) {
   _markRootUpdated(root, updatedLanes);
 
-  // External-runtime batch registry (pending edge): one array load + null
-  // check when no external write created a batch id for this lane.
-  batchRegistryOnRootUpdated(root, updatedLanes);
+  if ((updatedLanes & signalsTaps.watchedLanes) !== NoLanes) {
+    const consumer = signalsTaps.consumer;
+    if (consumer !== null) {
+      consumer.onRootUpdated(root, root.containerInfo, updatedLanes);
+    }
+  }
 
   if (enableInfiniteRenderLoopDetection) {
     // Check for recursive updates
@@ -2480,10 +2371,14 @@ function prepareFreshStack(root: FiberRoot, lanes: Lanes): Fiber {
 
   finishQueueingConcurrentUpdates();
 
-  // External-runtime lifecycle: a fresh stack starts (or, for NoLanes,
-  // resets) the render pass on this root. Fires after the concurrent update
-  // queue drained so listeners observe a consistent world.
-  notifyRenderPassStart(root, lanes);
+  const signalsConsumer = signalsTaps.consumer;
+  if (signalsConsumer !== null) {
+    signalsConsumer.onRenderPassStart(
+      root,
+      root.containerInfo,
+      entangledRenderLanes,
+    );
+  }
 
   if (__DEV__) {
     resetOwnerStackLimit();
@@ -2854,12 +2749,10 @@ function renderRootSync(
     workInProgressTransitions = getTransitionsForLanes(root, lanes);
     prepareFreshStack(root, lanes);
   } else {
-    // Continuing the in-progress pass synchronously (e.g. a yielded
-    // concurrent pass being finished after expiration or flushSync, or a
-    // stack the caller prepared right before this call). If the pass had
-    // yielded, this re-entry resumes it; a just-prepared stack never
-    // yielded and emits nothing.
-    notifyRenderPassResume(root);
+    const consumer = signalsTaps.consumer;
+    if (consumer !== null) {
+      consumer.onRenderPassResume(root, root.containerInfo);
+    }
   }
 
   if (enableSchedulingProfiler) {
@@ -2963,10 +2856,10 @@ function renderRootSync(
     // Did not complete the tree. This can happen if something suspended in
     // the shell.
 
-    // External-runtime lifecycle: the pass yields to the event loop with
-    // the tree unfinished. Its frame stays open; code running in the gap
-    // observes "not in render" (per-callstack truth).
-    notifyRenderPassYield(root);
+    const consumer = signalsTaps.consumer;
+    if (consumer !== null) {
+      consumer.onRenderPassYield(root, root.containerInfo);
+    }
   } else {
     // Normal case. We completed the whole tree.
 
@@ -2976,11 +2869,6 @@ function renderRootSync(
 
     // It's safe to process the queue now that the render phase is complete.
     finishQueueingConcurrentUpdates();
-
-    // External-runtime lifecycle: nothing to emit — the pass frame stays
-    // open through the completed-but-uncommitted period and closes at the
-    // commit (notifyRenderPassCommitted in commitRoot) or at the discard
-    // (the implicit end when a fresh stack throws this tree away).
   }
 
   return exitStatus;
@@ -3031,8 +2919,10 @@ function renderRootConcurrent(root: FiberRoot, lanes: Lanes): RootExitStatus {
     // data during an interleaved event.
     workInProgressRootIsPrerendering = checkIfRootIsPrerendering(root, lanes);
 
-    // External-runtime lifecycle: the yielded pass re-enters the work loop.
-    notifyRenderPassResume(root);
+    const consumer = signalsTaps.consumer;
+    if (consumer !== null) {
+      consumer.onRenderPassResume(root, root.containerInfo);
+    }
   }
 
   if (enableSchedulingProfiler) {
@@ -3256,10 +3146,10 @@ function renderRootConcurrent(root: FiberRoot, lanes: Lanes): RootExitStatus {
       markRenderYielded();
     }
 
-    // External-runtime lifecycle: the pass yields to the event loop with
-    // the tree unfinished. Its frame stays open; code running in the gap
-    // observes "not in render" (per-callstack truth).
-    notifyRenderPassYield(root);
+    const consumer = signalsTaps.consumer;
+    if (consumer !== null) {
+      consumer.onRenderPassYield(root, root.containerInfo);
+    }
 
     return RootInProgress;
   } else {
@@ -3274,11 +3164,6 @@ function renderRootConcurrent(root: FiberRoot, lanes: Lanes): RootExitStatus {
 
     // It's safe to process the queue now that the render phase is complete.
     finishQueueingConcurrentUpdates();
-
-    // External-runtime lifecycle: nothing to emit — the pass frame stays
-    // open through the completed-but-uncommitted period and closes at the
-    // commit (notifyRenderPassCommitted in commitRoot) or at the discard
-    // (the implicit end when a fresh stack throws this tree away).
 
     // Return the final exit status.
     return workInProgressRootExitStatus;
@@ -3989,23 +3874,8 @@ function commitRoot(
     remainingLanes &= ~GestureLane;
   }
 
-  // External-runtime batch registry: the write set this commit makes
-  // visible spans the finished lanes plus the lanes entangled with them —
-  // an entangled lane's updates were consumed by the committing pass's
-  // render (entangledRenderLanes) even when the lane itself did not name
-  // the render (e.g. a sibling transition under enableParallelTransitions).
-  // Capture the expansion BEFORE markRootFinished clears the entanglement
-  // bookkeeping. No same-root commit can have intervened since this pass
-  // rendered (it would have discarded the pass), so this is the render-time
-  // expansion, at most grown by lanes whose updates stayed pending — those
-  // are filtered out by the registry's remainingLanes check, except when
-  // NEW updates re-pended a lane this pass really rendered (mid-render
-  // runInBatch delivery / merge-rule lane reuse), which the registry
-  // reports as a committed-view advance using the re-pended lanes below
-  // and its render-time stash.
+  // Capture these before markRootFinished clears the entanglement bookkeeping.
   const entangledFinishedLanes = getEntangledLanes(root, lanes);
-  // Lanes holding updates that arrived while this pass was rendering (or
-  // waiting to commit): what keeps a rendered lane in remainingLanes.
   const rependedLanes = mergeLanes(updatedLanes, concurrentlyUpdatedLanes);
 
   markRootFinished(
@@ -4017,21 +3887,16 @@ function commitRoot(
     suspendedRetryLanes,
   );
 
-  // External-runtime lifecycle: the committing pass's frame closes here,
-  // disposition commit — before the finish edge below reports this commit's
-  // committed-view advance, so no listener ever observes a same-root
-  // committed-view advance while a same-root pass frame is open.
-  notifyRenderPassCommitted(root);
-
-  // External-runtime batch registry (finish edge): lanes leaving
-  // root.pendingLanes retire their batches, exactly once, at the same
-  // moment React's own books change.
-  batchRegistryOnRootFinished(
-    root,
-    entangledFinishedLanes,
-    root.pendingLanes,
-    rependedLanes,
-  );
+  const signalsConsumer = signalsTaps.consumer;
+  if (signalsConsumer !== null) {
+    signalsConsumer.onRootCommitted(
+      root,
+      root.containerInfo,
+      entangledFinishedLanes,
+      root.pendingLanes,
+      rependedLanes,
+    );
+  }
 
   // Reset this before firing side effects so we can detect recursive updates.
   didIncludeCommitPhaseUpdate = false;
@@ -4294,12 +4159,10 @@ function flushMutationEffects(): void {
     setCurrentUpdatePriority(DiscreteEventPriority);
     const prevExecutionContext = executionContext;
     executionContext |= CommitContext;
-    // External-runtime lifecycle: bracket exactly the window in which React
-    // mutates the host tree (e.g. so a MutationObserver can ignore React's
-    // own mutations). This must live here — not in commitRoot — because View
-    // Transition commits run this phase later, inside the browser's
-    // startViewTransition update callback.
-    notifyBeforeMutation(root);
+    const signalsConsumer = signalsTaps.consumer;
+    if (signalsConsumer !== null) {
+      signalsConsumer.onBeforeMutation(root.containerInfo);
+    }
     try {
       // The next phase is the mutation phase, where we mutate the host tree.
       commitMutationEffects(root, finishedWork, lanes);
@@ -4313,7 +4176,9 @@ function flushMutationEffects(): void {
     } finally {
       // The bracket closes in a finally so an error during the mutation
       // phase cannot leave listeners (observers) permanently paused.
-      notifyAfterMutation(root);
+      if (signalsConsumer !== null) {
+        signalsConsumer.onAfterMutation(root.containerInfo);
+      }
       // Reset the priority to the previous non-sync value.
       executionContext = prevExecutionContext;
       setCurrentUpdatePriority(previousPriority);

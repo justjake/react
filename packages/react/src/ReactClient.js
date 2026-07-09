@@ -64,15 +64,6 @@ import {addTransitionType} from './ReactTransitionType';
 import {act} from './ReactAct';
 import {captureOwnerStack} from './ReactOwnerStack';
 import * as ReactCompilerRuntime from './ReactCompilerRuntime';
-import {
-  subscribeToExternalRuntime,
-  registerExternalRuntimeBatchIdAllocator,
-  getExternalRuntimeCurrentWriteBatch,
-  getExternalRuntimeRenderContext,
-  externalRuntimeDiscardAllWip,
-  externalRuntimeRunInBatch,
-  externalRuntimeResetBatchRegistryForTest,
-} from './ReactExternalRuntime';
 
 const Children = {
   map,
@@ -128,14 +119,6 @@ export {
   getCacheForType as unstable_getCacheForType,
   useCacheRefresh as unstable_useCacheRefresh,
   use,
-  // External-runtime introspection for external state libraries
-  subscribeToExternalRuntime as unstable_subscribeToExternalRuntime,
-  registerExternalRuntimeBatchIdAllocator as unstable_registerBatchIdAllocator,
-  getExternalRuntimeCurrentWriteBatch as unstable_getCurrentWriteBatch,
-  getExternalRuntimeRenderContext as unstable_getRenderContext,
-  externalRuntimeDiscardAllWip as unstable_discardAllWip,
-  externalRuntimeRunInBatch as unstable_runInBatch,
-  externalRuntimeResetBatchRegistryForTest as unstable_resetBatchRegistryForTest,
   // enableScopeAPI
   REACT_SCOPE_TYPE as unstable_Scope,
   // enableTransitionTracing
